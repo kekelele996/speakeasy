@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import datetime
+import re
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -556,6 +557,69 @@ class ModulesConfig(BaseModel):
     )
 
 
+class MaskingRuleConfig(BaseModel):
+    """One regex rule applied to text values when a report is exported."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(description="Unique label for this rule, used when reporting replacement counts.")
+    pattern: str = Field(description="Python regular expression matched against exported string values.")
+    replacement: str = Field(
+        default="[REDACTED]",
+        description="Text substituted for every regex match. Backreferences such as \\1 or "
+        "\\g<name> follow re.sub semantics.",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("masking rule name must not be empty")
+        return v
+
+    @field_validator("pattern")
+    @classmethod
+    def validate_pattern(cls, v: str) -> str:
+        try:
+            re.compile(v)
+        except re.error as err:
+            raise ValueError(f"invalid regular expression: {err}") from err
+        return v
+
+    @model_validator(mode="after")
+    def validate_replacement(self) -> MaskingRuleConfig:
+        compiled = re.compile(self.pattern)
+        try:
+            # re.sub compiles the replacement template even when nothing matches, so a
+            # probe against the empty string surfaces bad escapes and group references.
+            # Unknown named groups surface as IndexError on some Python versions.
+            compiled.sub(self.replacement, "")
+        except (re.error, IndexError) as err:
+            raise ValueError(f"invalid replacement template: {err}") from err
+        return self
+
+
+class ReportMaskingConfig(BaseModel):
+    """Regex masking rules applied only while exporting the JSON report."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rules: list[MaskingRuleConfig] = Field(
+        default_factory=list,
+        description="Ordered masking rules. Rules run in list order over each exported "
+        "string value; dict keys and non-string values are left untouched.",
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_rule_names(self) -> ReportMaskingConfig:
+        seen: set[str] = set()
+        for rule in self.rules:
+            if rule.name in seen:
+                raise ValueError(f"duplicate masking rule name: {rule.name!r}")
+            seen.add(rule.name)
+        return self
+
+
 class SpeakeasyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -684,6 +748,11 @@ class SpeakeasyConfig(BaseModel):
     modules: ModulesConfig = Field(
         default_factory=lambda: ModulesConfig.model_validate(_copy_default_value("modules")),
         description="Module loading and inventory settings.",
+    )
+    report_masking: ReportMaskingConfig = Field(
+        default_factory=ReportMaskingConfig,
+        description="Regex rules applied to text values when exporting the JSON report. "
+        "Masking runs at export time only; emulation and the in-memory report are unaffected.",
     )
 
 

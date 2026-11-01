@@ -18,6 +18,7 @@ from speakeasy.cli_config import output_active_config
 from speakeasy.config import SpeakeasyConfig, get_default_config_dict
 from speakeasy.errors import ConfigError, NotSupportedError, SpeakeasyError
 from speakeasy.report import FileManifestEntry, Report
+from speakeasy.report_masking import mask_report_json
 from speakeasy.volumes import apply_volumes
 from speakeasy.windows.common import _PeParser
 from speakeasy.windows.winemu import execution_scope
@@ -415,11 +416,26 @@ class Speakeasy:
     @check_init
     def get_json_report(self) -> str:
         """
-        Get the emulation report from the emulator formatted as a JSON string
+        Get the emulation report from the emulator formatted as a JSON string.
+
+        When ``report_masking`` rules are configured, they are applied to the
+        exported text here. Masking happens at export time only: the in-memory
+        report returned by :meth:`get_report` and emulation itself are untouched.
+
         return:
             Get the emulation report as a JSON object
         """
-        return self.emu.get_json_report()
+        report_text = self.emu.get_json_report()
+        rules = self.config.report_masking.rules
+        if not rules:
+            return report_text
+        masked_text, counts = mask_report_json(report_text, rules)
+        for name, hits in counts.items():
+            if hits:
+                logger.info("* Report masking rule %r replaced %d occurrence(s)", name, hits)
+            else:
+                logger.warning("* Report masking rule %r replaced 0 occurrences; check the pattern", name)
+        return masked_text
 
     def add_api_hook(self, cb: Callable, module="", api_name="", argc=0, call_conv=None):
         """

@@ -401,6 +401,37 @@ The example below is JSONC (JSON with comments). Remove comment lines for machin
 }
 ```
 
+## Export-time report masking
+
+`report_masking.rules` replaces sensitive text (host paths, credentials, downloaded content)
+in exported JSON reports, so a report can be shared without hand-editing it:
+
+```jsonc
+{
+  "report_masking": {
+    "rules": [
+      // Rules run in list order over every string value in the report.
+      {"name": "host_home", "pattern": "/Users/[^\"\\s]+", "replacement": "[HOST_PATH]"},
+      {"name": "bearer", "pattern": "Bearer [A-Za-z0-9._-]+", "replacement": "Bearer [TOKEN]"},
+      // replacement defaults to "[REDACTED]"; re.sub backreferences such as \\1 are allowed.
+      {"name": "internal_host", "pattern": "\\.corp\\.example\\.com"}
+    ]
+  }
+}
+```
+
+- Only string *values* are rewritten. Dict keys, list lengths, numbers, booleans, and nulls
+  are preserved, so the masked export keeps the original report structure.
+- Masking is applied at export time only (`get_json_report` / the CLI `-o` output). Emulation
+  and the in-memory `Report` returned by `get_report` are unaffected.
+- The binary `data` store and dropped-files archives are not text-masked; only decoded text
+  values in the report are covered.
+- Each export logs the per-rule replacement count, including rules with zero hits, so a rule
+  that silently matched nothing stays visible.
+- Invalid rules fail configuration loading with a precise error: the rule index, whether the
+  `pattern` or `replacement` is invalid, and the underlying regex message. Rule names must be
+  non-empty and unique.
+
 ## CLI mapping and precedence
 
 CLI config overrides are generated from `SpeakeasyConfig` field definitions.

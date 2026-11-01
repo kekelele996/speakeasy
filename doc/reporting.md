@@ -73,6 +73,15 @@ thread, even for a local create.
 - `entry_points[*].dropped_files[*].data_ref` resolves through the top-level `data` store; large files keep metadata only. Dropped-files archive export is still available via `--dropped-files-path` ([recipe](cli-analysis-recipes.md#recipe-dropped-files)).
 - report-wide binary payload deduplication lives in the top-level `data` mapping, keyed by SHA-256.
 
+## Export-time masking
+
+When `report_masking.rules` is configured, `get_json_report()` (and the CLI `-o` export)
+rewrites regex-matched string values before serialization. Rules run at export time only:
+the in-memory `Report` from `get_report()`, emulation behavior, and report structure (keys,
+list lengths, non-string values) are unchanged. Per-rule replacement counts — including
+zero-hit rules — are logged on export. See [Configuration walkthrough](configuration.md#export-time-report-masking).
+The binary `data` store is not text-masked.
+
 ## Annotated report schema example
 
 ```jsonc
