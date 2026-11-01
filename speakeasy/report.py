@@ -520,6 +520,74 @@ class MemoryLayout(BaseModel):
     )
 
 
+class UsageEntry(BaseModel):
+    """Usage charged to one process/thread pair during one execution segment.
+
+    Rows are produced at the end of every public execution invocation
+    (``run_module``, ``run_shellcode``, ``call`` or ``resume``) by merging all
+    runs that executed in the same process and thread context. The same rows
+    are produced when a segment ends normally and when a limit or an error
+    stops it midway.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pid: int | None = Field(
+        default=None,
+        description=(
+            "Process that the runs executed in, when known.\n\n"
+            "Matches the ``pid`` of the corresponding entry points; null rows "
+            "represent context without a process, such as kernel driver runs."
+        ),
+    )
+    tid: int | None = Field(
+        default=None,
+        description=(
+            "Thread that the runs executed in, when known.\n\n"
+            "Dependency initializers and other runs sharing one thread are "
+            "merged into a single row."
+        ),
+    )
+    runtime: float = Field(
+        description=(
+            "Active execution time in seconds, including time spent in API handlers.\n\n"
+            "This is the same time that the per-run timeout and max_total_time "
+            "caps measure."
+        )
+    )
+    instr_count: int = Field(description="Instructions executed by the runs of this process and thread.")
+    runtime_share: float = Field(
+        description=(
+            "Fraction of the segment's total runtime charged to this process and thread, "
+            "between 0 and 1. Shares are rounded and may not add up to exactly 1."
+        )
+    )
+    instr_share: float = Field(
+        description=(
+            "Fraction of the segment's total instruction count charged to this process "
+            "and thread, between 0 and 1. Shares are rounded and may not add up to exactly 1."
+        )
+    )
+
+
+class UsageLedger(BaseModel):
+    """Per-process/thread usage ledger for one public execution invocation.
+
+    One ledger is settled at the end of each execution segment, whether it
+    completed normally or was stopped midway. Ledgers appear in invocation
+    order, and each covers the entry points produced by that invocation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_runtime: float = Field(description="Active execution time of the segment in seconds, summed across rows.")
+    total_instr_count: int = Field(description="Instructions executed in the segment, summed across rows.")
+    entries: list[UsageEntry] = Field(
+        default_factory=list,
+        description="Usage per process and thread, in first-seen execution order.",
+    )
+
+
 class EntryPoint(BaseModel):
     """Represents one emulation execution primitive captured as a run.
 
@@ -569,6 +637,15 @@ class EntryPoint(BaseModel):
         description=(
             "Instruction count executed for this run.\n\n"
             "Can be limited by configuration caps or early termination conditions."
+        ),
+    )
+    runtime: float | None = Field(
+        default=None,
+        description=(
+            "Active execution time in seconds for this run, including time spent in API handlers.\n\n"
+            "This is the same time that the timeout and max_total_time caps measure. "
+            "The usage ledger of the segment that produced this run groups these values "
+            "by process and thread."
         ),
     )
     apihash: str = Field(
@@ -737,6 +814,17 @@ class Report(BaseModel):
         description=(
             "Ordered list of all runs executed during emulation.\n\n"
             "This is the primary behavioral timeline for the report."
+        ),
+    )
+    usage: list[UsageLedger] | None = Field(
+        default=None,
+        description=(
+            "Per-segment usage ledgers, one per public execution invocation "
+            "(run_module, run_shellcode, call, or resume), in invocation order.\n\n"
+            "Each ledger breaks the actual runtime and instruction count of the "
+            "invocation down by process and thread, with each row's share of the "
+            "segment totals. Ledgers are settled the same way whether the segment "
+            "completed normally or a limit or error stopped it midway."
         ),
     )
 

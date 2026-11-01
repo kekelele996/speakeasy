@@ -1,7 +1,7 @@
 # Copyright (C) 2020 FireEye, Inc. All Rights Reserved.
 
 # Data format versioning
-__report_version__ = "5.0.0"
+__report_version__ = "5.1.0"
 
 import hashlib
 import time
@@ -69,6 +69,8 @@ from speakeasy.report import (
     StringCollection,
     StringsReport,
     SymAccessReport,
+    UsageEntry,
+    UsageLedger,
 )
 from speakeasy.windows.loaders import InitRoutine
 
@@ -190,6 +192,71 @@ class Profiler:
         self.meta: dict[str, Any] = {}
         self.runs: list[Run] = []
         self.artifact_store: ArtifactStore = ArtifactStore()
+        # Usage ledgers settled at the end of each public execution invocation.
+        # Each entry holds totals plus per (pid, tid) rows of unrounded values.
+        self.usage_ledgers: list[dict[str, Any]] = []
+        # Index into runs where the open segment started, or None outside a segment.
+        self._usage_segment_start: int | None = None
+
+    def begin_usage_segment(self) -> None:
+        """
+        Open a usage ledger for one public execution invocation. Runs that
+        start afterwards belong to the segment.
+        """
+        self._usage_segment_start = len(self.runs)
+
+    def close_usage_segment(self) -> None:
+        """
+        Settle the ledger of the open segment: merge the runs it executed by
+        process and thread, charging them actual runtime and instruction
+        counts.
+
+        Segments stopped by a limit or an error settle the same way, because
+        only runs that actually started are captured. A segment that started
+        no run adds no ledger.
+        """
+        start = self._usage_segment_start
+        self._usage_segment_start = None
+        if start is None:
+            return
+        segment_runs = self.runs[start:]
+
+        rows: dict[tuple[int | None, int | None], dict[str, Any]] = {}
+        order: list[tuple[int | None, int | None]] = []
+        total_runtime = 0.0
+        total_instr = 0
+        for run in segment_runs:
+            key = self.get_run_process_thread(run)
+            row = rows.get(key)
+            if row is None:
+                row = {"pid": key[0], "tid": key[1], "runtime": 0.0, "instr_count": 0}
+                rows[key] = row
+                order.append(key)
+            runtime = run.execution_elapsed
+            instr_count = run.instr_cnt
+            row["runtime"] += runtime
+            row["instr_count"] += instr_count
+            total_runtime += runtime
+            total_instr += instr_count
+
+        if not order:
+            return
+        self.usage_ledgers.append(
+            {
+                "total_runtime": total_runtime,
+                "total_instr_count": total_instr,
+                "entries": [rows[key] for key in order],
+            }
+        )
+
+    @staticmethod
+    def get_run_process_thread(run: Run) -> tuple[int | None, int | None]:
+        """Get the (pid, tid) that run executed in, matching entry-point attribution."""
+        thread = run.thread
+        process = run.process_context or (thread.process if thread is not None else None)
+        pid = process.id if process is not None else None
+        tid = thread.tid if thread is not None else None
+        return pid, tid
 
     def add_input_metadata(self, meta):
         """
@@ -788,6 +855,7 @@ class Profiler:
                 pid=ep_pid,
                 tid=ep_tid,
                 instr_count=r.instr_cnt if r.instr_cnt else None,
+                runtime=round(r.execution_elapsed, 3) if r.execution_elapsed else None,
                 apihash=r.api_hash.hexdigest(),
                 ret_val=r.ret_val,
                 error=error_info,
@@ -820,6 +888,8 @@ class Profiler:
 
         errors: list[ErrorInfo] | None = self.meta.get("errors") or None
 
+        usage = self._build_usage_report()
+
         report_data = self.artifact_store.to_report_data()
         report = Report(
             report_version=__report_version__,
@@ -835,5 +905,41 @@ class Profiler:
             strings=strings_report,
             data=report_data or None,
             entry_points=entry_points,
+            usage=usage,
         )
         return report
+
+    @staticmethod
+    def _usage_share(value: float, total: float) -> float:
+        """Get a row's fraction of a segment total; zero when the segment total is zero."""
+        if not total:
+            return 0.0
+        return round(value / total, 6)
+
+    def _build_usage_report(self) -> list[UsageLedger] | None:
+        """Turn the settled usage ledgers into report models with rounded time and shares."""
+        if not self.usage_ledgers:
+            return None
+        ledgers: list[UsageLedger] = []
+        for ledger in self.usage_ledgers:
+            total_runtime = ledger["total_runtime"]
+            total_instr = ledger["total_instr_count"]
+            entries = [
+                UsageEntry(
+                    pid=row["pid"],
+                    tid=row["tid"],
+                    runtime=round(row["runtime"], 3),
+                    instr_count=row["instr_count"],
+                    runtime_share=self._usage_share(row["runtime"], total_runtime),
+                    instr_share=self._usage_share(row["instr_count"], total_instr),
+                )
+                for row in ledger["entries"]
+            ]
+            ledgers.append(
+                UsageLedger(
+                    total_runtime=round(total_runtime, 3),
+                    total_instr_count=total_instr,
+                    entries=entries,
+                )
+            )
+        return ledgers

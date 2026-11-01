@@ -16,8 +16,10 @@ The examples use JSONC for explanation. Remove comments for machine parsing.
 - `errors`: top-level session errors recorded by profiler. The loader adds an `invalid_image` error, with the defect in `context_summary`, when the entry point or the import directory of the input PE is outside the image, or when the raw data of a section is past the end of the file. Emulation then continues.
 - `strings`: only present if string extraction is enabled and non-empty.
 - `entry_points`: one per run (`Run` object) in execution order.
+- `usage`: one ledger per public execution invocation (`run_module`, `run_shellcode`, `call`, `resume`), in invocation order. Each ledger totals the active runtime and instruction count of the invocation and lists one row per process/thread pair with the actual runtime, instruction count, and share (`runtime_share`, `instr_share`, 0 to 1) of each total. Runs sharing a thread, such as dependency initializers, are merged into one row. Ledgers settle the same way whether the invocation completed normally or was stopped midway by a limit or error; invocations that started no run add no ledger.
 
 Entry-point highlights:
+- `runtime`: active execution time in seconds for this run, the same time the `timeout` and `max_total_time` caps measure. The `usage` ledger groups these values (and `instr_count`) by process and thread for its invocation.
 - `apihash`: SHA-256 over unique API names, lowercased, first-seen order.
 - `events`: built by profiler recorders (`record_api_event`, `record_file_access_event`, `record_process_event`, `record_registry_access_event`, `record_dns_event`, `record_http_event`, `record_network_event`, `record_exception_event`).
 - `sym_accesses`: populated from memory-tracing symbol counters.
@@ -78,7 +80,7 @@ thread, even for a local create.
 ```jsonc
 {
   // Report format version.
-  "report_version": "5.0.0",
+  "report_version": "5.1.0",
 
   // Total wall-clock runtime in seconds.
   "emulation_total_runtime": 1.234,
@@ -134,6 +136,9 @@ thread, even for a local create.
 
       // Total instructions executed by this run.
       "instr_count": 12345,
+
+      // Active execution time of this run in seconds.
+      "runtime": 0.82,
 
       // Hash over unique API names called in this run.
       "apihash": "2222222222222222222222222222222222222222222222222222222222222222",
@@ -415,6 +420,33 @@ thread, even for a local create.
         ]
       }
     }
+  ],
+
+  // One ledger per public execution invocation, in invocation order.
+  // Rows merge runs by process and thread, with shares of the segment totals.
+  "usage": [
+    {
+      "total_runtime": 1.202,
+      "total_instr_count": 20000,
+      "entries": [
+        {
+          "pid": 1337,
+          "tid": 2000,
+          "runtime": 0.82,
+          "instr_count": 12345,
+          "runtime_share": 0.682196,
+          "instr_share": 0.61725
+        },
+        {
+          "pid": 1337,
+          "tid": 2100,
+          "runtime": 0.382,
+          "instr_count": 7655,
+          "runtime_share": 0.317804,
+          "instr_share": 0.38275
+        }
+      ]
+    }
   ]
 }
 ```
@@ -423,7 +455,7 @@ thread, even for a local create.
 
 ```json
 {
-  "report_version": "5.0.0",
+  "report_version": "5.1.0",
   "emulation_total_runtime": 0.012,
   "timestamp": 1760000000,
   "arch": "x86",
@@ -447,7 +479,7 @@ thread, even for a local create.
 ```jsonc
 {
   // Report schema version.
-  "report_version": "5.0.0",
+  "report_version": "5.1.0",
 
   // Total runtime in seconds for this emulation session.
   "emulation_total_runtime": 0.012,

@@ -182,10 +182,17 @@ def execution_scope(func):
         if emu is None or emu._execution_budget is not None:
             return func(self, *args, **kwargs)
         emu._execution_budget = _ExecutionBudget(emu.config.max_total_time)
+        profiler = emu.profiler
+        if profiler is not None:
+            profiler.begin_usage_segment()
         try:
             return func(self, *args, **kwargs)
         finally:
             emu._execution_budget = None
+            # Settle the usage ledger the same way whether the segment ended
+            # normally or a limit, error, or exception stopped it midway.
+            if profiler is not None:
+                profiler.close_usage_segment()
 
     return wrapped
 
