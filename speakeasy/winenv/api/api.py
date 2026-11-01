@@ -441,29 +441,57 @@ class ApiHandler:
                 run, pos, path, event_type, value_name, data, handle, disposition, access, buffer, size
             )
 
-    def record_dns_event(self, domain, ip=""):
+    def record_dns_event(self, domain, ip="", conn_key=None):
         logger.debug("dns: %s -> %s", domain, ip)
         profiler = self.emu.get_profiler()
         if profiler:
             run = self.emu.get_current_run()
             pos = self._get_current_trace_position()
-            profiler.record_dns_event(run, pos, domain, ip)
+            profiler.record_dns_event(run, pos, domain, ip, conn_key=conn_key)
 
-    def record_network_event(self, server, port, typ="unknown", proto="unknown", data=b"", method=""):
+    def record_network_event(self, server, port, typ="unknown", proto="unknown", data=b"", method="", conn_key=None):
         logger.debug("net: %s:%d %s", server, port, proto)
         profiler = self.emu.get_profiler()
         if profiler:
             run = self.emu.get_current_run()
             pos = self._get_current_trace_position()
-            profiler.record_network_event(run, pos, server, port, typ=typ, proto=proto, data=data, method=method)
+            profiler.record_network_event(
+                run,
+                pos,
+                server,
+                port,
+                typ=typ,
+                proto=proto,
+                data=data,
+                method=method,
+                conn_key=conn_key,
+            )
 
-    def record_http_event(self, server, port, headers="", body=b"", secure=False):
+    def record_http_event(self, server, port, headers="", body=b"", secure=False, conn_key=None, method=None):
         logger.debug("http: %s:%d", server, port)
         profiler = self.emu.get_profiler()
         if profiler:
             run = self.emu.get_current_run()
             pos = self._get_current_trace_position()
-            profiler.record_http_event(run, pos, server, port, headers=headers, body=body, secure=secure)
+            profiler.record_http_event(
+                run,
+                pos,
+                server,
+                port,
+                headers=headers,
+                body=body,
+                secure=secure,
+                conn_key=conn_key,
+                method=method,
+            )
+
+    def record_http_response(self, server, port, data=b"", secure=False, conn_key=None):
+        logger.debug("http response: %s:%d %d bytes", server, port, len(data or b""))
+        profiler = self.emu.get_profiler()
+        if profiler:
+            run = self.emu.get_current_run()
+            pos = self._get_current_trace_position()
+            profiler.record_http_response_event(run, pos, server, port, data=data, secure=secure, conn_key=conn_key)
 
     def get_max_int(self):
         # Byte order is irrelevant here

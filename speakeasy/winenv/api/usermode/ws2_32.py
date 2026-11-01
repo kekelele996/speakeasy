@@ -359,7 +359,14 @@ class Ws2_32(api.ApiHandler):
 
         socket.set_connection_info(raddr, rport)
 
-        self.record_network_event(raddr, rport, typ="connect", proto=proto, method="winsock.connect")
+        self.record_network_event(
+            raddr,
+            rport,
+            typ="connect",
+            proto=proto,
+            method="winsock.connect",
+            conn_key=f"sock:{socket.fd}",
+        )
 
         ctx.args["name"].display = f"{raddr}:{rport}"
 
@@ -396,7 +403,14 @@ class Ws2_32(api.ApiHandler):
             proto = "raw"
 
         socket.set_connection_info(raddr, rport)
-        self.record_network_event(raddr, rport, typ="bind", proto=proto, method="winsock.bind")
+        self.record_network_event(
+            raddr,
+            rport,
+            typ="bind",
+            proto=proto,
+            method="winsock.bind",
+            conn_key=f"sock:{socket.fd}",
+        )
 
         ctx.args["name"].display = f"{raddr}:{rport}"
 
@@ -473,7 +487,14 @@ class Ws2_32(api.ApiHandler):
 
         new_sock.set_connection_info(aip, port)
 
-        self.record_network_event(aip, port, typ="accept", proto=proto, method="winsock.accept")
+        self.record_network_event(
+            aip,
+            port,
+            typ="accept",
+            proto=proto,
+            method="winsock.accept",
+            conn_key=f"sock:{new_sock.fd}",
+        )
 
         if addr:
             sockaddr = self.wstypes.sockaddr_in(emu.get_ptr_size())
@@ -677,7 +698,15 @@ class Ws2_32(api.ApiHandler):
             proto = "raw"
 
         raddr, rport = sock.get_connection_info()
-        self.record_network_event(raddr, rport, typ="data_in", proto=proto, method="winsock.recv", data=data)
+        self.record_network_event(
+            raddr,
+            rport,
+            typ="data_in",
+            proto=proto,
+            method="winsock.recv",
+            data=data,
+            conn_key=f"sock:{sock.fd}",
+        )
 
         return rv
 
@@ -711,7 +740,15 @@ class Ws2_32(api.ApiHandler):
             data = self.mem_read(buf, blen)
         raddr, rport = socket.get_connection_info()
 
-        self.record_network_event(raddr, rport, typ="data_out", proto=proto, method="winsock.send", data=data)
+        self.record_network_event(
+            raddr,
+            rport,
+            typ="data_out",
+            proto=proto,
+            method="winsock.send",
+            data=data,
+            conn_key=f"sock:{socket.fd}",
+        )
 
         return len(data)
 

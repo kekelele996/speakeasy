@@ -211,14 +211,23 @@ class WinHttp(api.ApiHandler):
         req = self.netman.get_wininet_object(hnd)
         srv = req.get_server()
         port = req.get_port()
+        conn_key = f"http:{req.get_handle()}"
 
         if not is_ip_address(srv):
-            self.record_dns_event(srv)
+            self.record_dns_event(srv, conn_key=conn_key)
 
         rv = 1
         req_str = req.format_http_request(headers=headers)
 
-        self.record_http_event(srv, port, headers=req_str, body=body, secure=req.is_secure())
+        self.record_http_event(
+            srv,
+            port,
+            headers=req_str,
+            body=body,
+            secure=req.is_secure(),
+            conn_key=conn_key,
+            method=req.verb.upper(),
+        )
         return rv
 
     @apihook("WinHttpReceiveResponse", argc=2, conv=_arch.CALL_CONV_STDCALL)
@@ -256,6 +265,14 @@ class WinHttp(api.ApiHandler):
 
         if bytes_read:
             self.mem_write(bytes_read, (len(data)).to_bytes(4, "little"))
+
+        self.record_http_response(
+            req.get_server(),
+            req.get_port(),
+            data=data,
+            secure=req.is_secure(),
+            conn_key=f"http:{req.get_handle()}",
+        )
 
         return rv
 

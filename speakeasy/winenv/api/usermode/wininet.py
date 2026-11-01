@@ -254,14 +254,23 @@ class Wininet(api.ApiHandler):
         req = self.netman.get_wininet_object(hnd)
         srv = req.get_server()
         port = req.get_port()
+        conn_key = f"http:{req.get_handle()}"
 
         if not is_ip_address(srv):
-            self.record_dns_event(srv)
+            self.record_dns_event(srv, conn_key=conn_key)
 
         rv = 1
         req_str = req.format_http_request(headers=headers)
 
-        self.record_http_event(srv, port, headers=req_str, body=body, secure=req.is_secure())
+        self.record_http_event(
+            srv,
+            port,
+            headers=req_str,
+            body=body,
+            secure=req.is_secure(),
+            conn_key=conn_key,
+            method=req.verb.upper(),
+        )
         return rv
 
     @apihook("InternetErrorDlg", argc=5, conv=_arch.CALL_CONV_STDCALL)
@@ -326,6 +335,14 @@ class Wininet(api.ApiHandler):
 
         if bytes_read:
             self.mem_write(bytes_read, (len(data)).to_bytes(4, "little"))
+
+        self.record_http_response(
+            req.get_server(),
+            req.get_port(),
+            data=data,
+            secure=req.is_secure(),
+            conn_key=f"http:{req.get_handle()}",
+        )
 
         return rv
 
@@ -458,9 +475,15 @@ class Wininet(api.ApiHandler):
         port = explicit_port or default_port
         if explicit_port:
             server = server.rpartition(":")[0]
-        self.record_http_event(server, port, headers=headers)
         sess = wini.new_session(server, port, "", "", "", defs, dwContext)
         if not sess:
             return 0
         req = sess.new_request("GET", url, None, None, None, defs, dwContext)
+        self.record_http_event(
+            server,
+            port,
+            headers=headers,
+            conn_key=f"http:{req.get_handle()}",
+            method="GET",
+        )
         return req.get_handle()

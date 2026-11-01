@@ -649,3 +649,181 @@ def test_internet_open_url_records_the_host_and_port(dll_emu: Speakeasy, url: by
     assert call(dll_emu, "wininet", "InternetOpenUrlA", [inet, alloc(dll_emu, url + b"\x00"), 0, 0, 0, 0])[0]
     events = [e for e in dll_emu.emu.get_current_run().events if e.event == "net_http"]
     assert [(e.server, e.port) for e in events] == [(server, port)]
+
+
+def _connections(se: Speakeasy):
+    run = se.emu.get_current_run()
+    return se.emu.get_profiler().build_network_connections(run)
+
+
+def _sockaddr_in(se: Speakeasy, port: int, addr: bytes) -> int:
+    return alloc(se, struct.pack("<H", 2) + struct.pack(">H", port) + addr + b"\x00" * 8)
+
+
+def test_socket_chain_is_grouped_into_one_connection_with_dns(dll_emu: Speakeasy) -> None:
+    start_process(dll_emu)
+
+    name = alloc(dll_emu, b"google.com\x00")
+    assert call(dll_emu, "ws2_32", "gethostbyname", [name])[0]
+    s, _ = call(dll_emu, "ws2_32", "socket", [2, 1, 6])
+    peer = _sockaddr_in(dll_emu, 443, bytes([8, 8, 8, 8]))
+    assert call(dll_emu, "ws2_32", "connect", [s, peer, 16])[0] == 0
+
+    payload = alloc(dll_emu, b"REQUEST!")
+    assert call(dll_emu, "ws2_32", "send", [s, payload, 8, 0])[0] == 8
+
+    buf = alloc(dll_emu, b"\x00" * 0x100)
+    assert call(dll_emu, "ws2_32", "recv", [s, buf, 16, 0])[0] == 12
+
+    conns = _connections(dll_emu)
+    assert len(conns) == 1
+    conn = conns[0]
+    assert conn.connection_id == "conn-1"
+    assert conn.target == "google.com"
+    assert conn.dns_query == "google.com"
+    assert (conn.port, conn.proto, conn.kind, conn.method) == (443, "tcp", "connect", None)
+    assert conn.tid == dll_emu.emu.get_current_thread().tid
+    assert (conn.bytes_sent, conn.bytes_recv, conn.status) == (8, 12, "ok")
+
+    stager = (Path(speakeasy.__file__).parent / "resources" / "web" / "stager.bin").read_bytes()
+    assert conn.response is not None
+    assert len(conn.response.preview) == 12
+    store = dll_emu.emu.get_profiler().artifact_store
+    assert store.get_bytes(conn.response.data_ref) == stager
+
+    event_types = [e.event for e in dll_emu.emu.get_current_run().events]
+    assert "net_dns" in event_types
+    assert "net_traffic" in event_types
+
+
+def test_two_sockets_to_the_same_endpoint_stay_separate_connections(dll_emu: Speakeasy) -> None:
+    s1, _ = call(dll_emu, "ws2_32", "socket", [2, 1, 6])
+    s2, _ = call(dll_emu, "ws2_32", "socket", [2, 1, 6])
+    peer1 = _sockaddr_in(dll_emu, 4444, bytes([10, 1, 2, 3]))
+    peer2 = _sockaddr_in(dll_emu, 4444, bytes([10, 1, 2, 3]))
+    assert call(dll_emu, "ws2_32", "connect", [s1, peer1, 16])[0] == 0
+    assert call(dll_emu, "ws2_32", "connect", [s2, peer2, 16])[0] == 0
+
+    conns = _connections(dll_emu)
+    assert [c.connection_id for c in conns] == ["conn-1", "conn-2"]
+    assert {c.target for c in conns} == {"10.1.2.3"}
+    assert all(c.status == "no_data" for c in conns)
+
+
+def test_connection_without_a_response_is_kept(dll_emu: Speakeasy) -> None:
+    name = alloc(dll_emu, b"anything.example\x00")
+    assert call(dll_emu, "ws2_32", "gethostbyname", [name])[0]
+    s, _ = call(dll_emu, "ws2_32", "socket", [2, 1, 6])
+    peer = _sockaddr_in(dll_emu, 80, bytes([10, 1, 2, 3]))
+    assert call(dll_emu, "ws2_32", "connect", [s, peer, 16])[0] == 0
+
+    conns = _connections(dll_emu)
+    assert len(conns) == 1
+    conn = conns[0]
+    assert (conn.target, conn.dns_query, conn.port) == ("anything.example", "anything.example", 80)
+    assert conn.status == "no_data"
+    assert conn.response is None
+    assert conn.bytes_recv == 0
+
+
+def test_unresolved_dns_lookup_is_kept_as_a_failed_connection(
+    config: dict[str, Any], load_test_bin: Callable[[str], bytes]
+) -> None:
+    config["network"]["dns"]["names"] = {"google.com": "8.8.8.8"}
+    for se in load_emu(config, load_test_bin("dll_test_x86.dll.xz")):
+        name = alloc(se, b"nope.invalid\x00")
+        assert call(se, "ws2_32", "gethostbyname", [name])[0] == 0
+
+        conns = _connections(se)
+        assert len(conns) == 1
+        conn = conns[0]
+        assert conn.target == "nope.invalid"
+        assert conn.kind == "dns"
+        assert conn.proto == "dns"
+        assert conn.port is None
+        assert conn.status == "unresolved"
+        assert conn.response is None
+        assert (conn.bytes_sent, conn.bytes_recv) == (0, 0)
+
+
+def test_wininet_request_is_grouped_with_its_response(dll_emu: Speakeasy) -> None:
+    start_process(dll_emu)
+    req = _wininet_request(dll_emu, b"GET", b"/gate.php")
+    body = alloc(dll_emu, b"a=1&b=2")
+    assert call(dll_emu, "wininet", "HttpSendRequestA", [req, 0, 0, body, 7])[0] == 1
+
+    buf = alloc(dll_emu, b"\xcc" * 32)
+    read = alloc(dll_emu, b"\xcc" * 4)
+    assert call(dll_emu, "wininet", "InternetReadFile", [req, buf, 16, read])[0] == 1
+
+    conns = _connections(dll_emu)
+    assert len(conns) == 1
+    conn = conns[0]
+    assert conn.target == "example.com"
+    assert conn.dns_query == "example.com"
+    assert (conn.port, conn.proto, conn.kind, conn.method) == (80, "http", "http", "GET")
+    assert conn.tid == dll_emu.emu.get_current_thread().tid
+    assert (conn.bytes_sent, conn.bytes_recv, conn.status) == (7, 16, "ok")
+    assert conn.response is not None
+
+    default = (Path(speakeasy.__file__).parent / "resources" / "web" / "default.bin").read_bytes()
+    store = dll_emu.emu.get_profiler().artifact_store
+    assert store.get_bytes(conn.response.data_ref) == default[:16]
+
+
+def test_winhttp_request_without_a_read_is_kept_then_completes(dll_emu: Speakeasy) -> None:
+    req = _winhttp_request(dll_emu, "GET", "/index")
+    assert call(dll_emu, "winhttp", "WinHttpSendRequest", [req, 0, 0, 0, 0, 0, 0])[0] == 1
+
+    conns = _connections(dll_emu)
+    assert len(conns) == 1
+    conn = conns[0]
+    assert (conn.target, conn.kind, conn.method, conn.proto) == ("example.com", "http", "GET", "http")
+    assert conn.status == "no_data"
+    assert conn.bytes_recv == 0
+    assert conn.response is None
+
+    buf = alloc(dll_emu, b"\xcc" * 4096)
+    read = alloc(dll_emu, b"\xcc" * 4)
+    assert call(dll_emu, "winhttp", "WinHttpReadData", [req, buf, 4096, read])[0] == 1
+
+    conns = _connections(dll_emu)
+    assert len(conns) == 1
+    conn = conns[0]
+    assert (conn.bytes_recv, conn.status) == (4096, "ok")
+    assert conn.response is not None and len(conn.response.preview) == 128
+
+
+def test_internet_open_url_starts_a_get_connection(dll_emu: Speakeasy) -> None:
+    inet, _ = call(dll_emu, "wininet", "InternetOpenA", [0, 0, 0, 0, 0])
+    url = alloc(dll_emu, b"http://example.com/a.bin\x00")
+    req, _ = call(dll_emu, "wininet", "InternetOpenUrlA", [inet, url, 0, 0, 0, 0])
+    assert req
+
+    conns = _connections(dll_emu)
+    assert len(conns) == 1
+    conn = conns[0]
+    assert (conn.target, conn.port, conn.kind, conn.method) == ("example.com", 80, "http", "GET")
+    assert conn.status == "no_data"
+
+
+def test_network_connections_are_serialized_into_the_run_report(dll_emu: Speakeasy) -> None:
+    s, _ = call(dll_emu, "ws2_32", "socket", [2, 1, 6])
+    peer = _sockaddr_in(dll_emu, 80, bytes([10, 1, 2, 3]))
+    assert call(dll_emu, "ws2_32", "connect", [s, peer, 16])[0] == 0
+
+    run = dll_emu.emu.get_current_run()
+    run.start_addr = 0x1000
+    run.type = "test_run"
+    profiler = dll_emu.emu.get_profiler()
+    profiler.add_run(run)
+
+    report = profiler.get_report()
+    entry = report.entry_points[-1]
+    assert entry.network_connections is not None
+    assert entry.network_connections[0].target == "10.1.2.3"
+
+    dumped = report.model_dump_json(exclude_none=True)
+    assert '"network_connections"' in dumped
+    assert '"no_data"' in dumped
+    assert '"response"' not in dumped[dumped.index('"network_connections"') :]

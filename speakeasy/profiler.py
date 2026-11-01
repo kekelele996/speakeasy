@@ -1,7 +1,7 @@
 # Copyright (C) 2020 FireEye, Inc. All Rights Reserved.
 
 # Data format versioning
-__report_version__ = "5.0.0"
+__report_version__ = "5.1.0"
 
 import hashlib
 import time
@@ -65,6 +65,8 @@ from speakeasy.report import (
     MemoryLayout,
     MemoryRegion,
     ModuleSegment,
+    NetworkConnection,
+    NetworkResponseSummary,
     Report,
     StringCollection,
     StringsReport,
@@ -125,6 +127,50 @@ class DynCode(TypedDict):
     base_addrs: set[int]
 
 
+# Maximum inbound bytes retained per connection for the response summary and
+# its data store reference. Byte counters still reflect the full traffic.
+NETWORK_RESPONSE_CAPTURE_LIMIT = 0x3000
+NETWORK_RESPONSE_PREVIEW_LIMIT = 128
+
+# Connection status labels exposed in the report.
+NETCONN_OK = "ok"
+NETCONN_NO_DATA = "no_data"
+NETCONN_UNRESOLVED = "unresolved"
+
+
+@dataclass
+class NetworkConnState:
+    """Accumulates all recorded network actions for one connection in a run."""
+
+    key: str
+    tid: int
+    pid: int
+    tick: int
+    target: str = ""
+    port: int | None = None
+    proto: str | None = None
+    kind: str = "traffic"
+    method: str | None = None
+    dns_query: str | None = None
+    bytes_sent: int = 0
+    bytes_recv: int = 0
+    recv_buffer: bytearray = field(default_factory=bytearray)
+    resolved: bool = True
+
+
+def _preview_network_data(data: bytes, limit: int = NETWORK_RESPONSE_PREVIEW_LIMIT) -> str:
+    """Render the first ``limit`` bytes as printable ASCII with dots."""
+    return "".join(chr(b) if 0x20 <= b < 0x7F else "." for b in data[:limit])
+
+
+def _http_method_from_headers(headers: str | None) -> str | None:
+    """Extract the request method from a formatted HTTP request line."""
+    if not headers:
+        return None
+    token = headers.split("\n", 1)[0].strip().split(" ", 1)[0]
+    return token.upper() if token.isalpha() else None
+
+
 class Run:
     """
     This class represents the basic execution primative for the emulation engine
@@ -163,6 +209,12 @@ class Run:
         self.coverage: set[int] = set()
         self.memory_regions: list[dict[str, Any]] = []
         self.loaded_modules: list[dict[str, Any]] = []
+
+        # Per-connection network activity folded as events are recorded.
+        self.network_conns: dict[str, NetworkConnState] = {}
+        # Resolved IP -> domain, used to fold later socket traffic into the
+        # connection that began with a DNS lookup.
+        self.dns_by_ip: dict[str, str] = {}
 
     def get_api_count(self):
         """
@@ -573,26 +625,87 @@ class Profiler:
         run.events.append(event)
         self.last_event = event
 
-    def record_dns_event(self, run, pos: TracePosition, domain, ip=""):
-        """
-        Log DNS name lookups for the emulation report
-        """
-        for evt in run.events:
-            if isinstance(evt, NetDnsEvent) and evt.query == domain and evt.response == ip:
-                return
+    def _get_network_conn(self, run: Run, pos: TracePosition, conn_key: str) -> NetworkConnState:
+        """Return the accumulated connection state, creating it on first use."""
+        conn = run.network_conns.get(conn_key)
+        if conn is None:
+            conn = NetworkConnState(key=conn_key, tid=pos.tid, pid=pos.pid, tick=pos.tick)
+            run.network_conns[conn_key] = conn
+        return conn
 
-        event = NetDnsEvent(
-            pos=pos,
-            query=domain,
-            response=ip if ip else None,
+    def _link_dns_target(self, run: Run, conn: NetworkConnState, server: str) -> None:
+        """Fold a prior DNS lookup into a raw-socket connection to its answer IP."""
+        if not server:
+            return
+        domain = run.dns_by_ip.get(server)
+        if domain and not conn.dns_query:
+            conn.dns_query = domain
+            conn.target = domain
+
+    def _record_inbound(self, conn: NetworkConnState, data: bytes) -> None:
+        conn.bytes_recv += len(data)
+        remaining = NETWORK_RESPONSE_CAPTURE_LIMIT - len(conn.recv_buffer)
+        if remaining > 0 and data:
+            conn.recv_buffer.extend(data[:remaining])
+
+    def record_dns_event(self, run, pos: TracePosition, domain, ip="", conn_key=None):
+        """
+        Log DNS name lookups for the emulation report and fold the lookup into
+        the connection it belongs to. Lookups tied to an explicit connection
+        key annotate that connection; standalone lookups are matched to later
+        socket traffic via their answer IP, or retained on their own when the
+        name could not be resolved.
+        """
+        duplicate = any(
+            isinstance(evt, NetDnsEvent) and evt.query == domain and evt.response == (ip or None) for evt in run.events
         )
-        run.events.append(event)
+        if not duplicate:
+            run.events.append(
+                NetDnsEvent(
+                    pos=pos,
+                    query=domain,
+                    response=ip if ip else None,
+                )
+            )
+
+        if conn_key:
+            conn = self._get_network_conn(run, pos, conn_key)
+            if not conn.dns_query:
+                conn.dns_query = domain
+            return
+
+        if ip:
+            run.dns_by_ip[ip] = domain
+            # The lookup may have happened after the socket connected.
+            for existing in run.network_conns.values():
+                if existing.kind in ("connect", "accept", "traffic") and existing.target == ip:
+                    existing.dns_query = domain
+                    existing.target = domain
+            return
+
+        conn = self._get_network_conn(run, pos, f"dns:{(domain or '').lower()}")
+        conn.kind = "dns"
+        conn.proto = "dns"
+        conn.target = domain or ""
+        conn.dns_query = domain or None
+        conn.resolved = False
 
     def record_http_event(
-        self, run, pos: TracePosition, server, port, proto="http", headers="", body=b"", secure=False
+        self,
+        run,
+        pos: TracePosition,
+        server,
+        port,
+        proto="http",
+        headers="",
+        body=b"",
+        secure=False,
+        conn_key=None,
+        method=None,
     ):
         """
-        Log HTTP traffic that occur during emulation
+        Log HTTP traffic that occur during emulation and fold it into the
+        connection record for the request handle.
         """
         proto_str = "https" if secure else "http"
         body_ref = self.put_binary_data(body or b"", limit=0x3000)
@@ -606,17 +719,46 @@ class Profiler:
             body_ref=body_ref,
         )
 
-        for evt in run.events:
-            if (
-                isinstance(evt, NetHttpEvent)
-                and evt.server == event.server
-                and evt.port == event.port
-                and evt.proto == event.proto
-                and evt.headers == event.headers
-            ):
-                return
+        duplicate = any(
+            isinstance(evt, NetHttpEvent)
+            and evt.server == event.server
+            and evt.port == event.port
+            and evt.proto == event.proto
+            and evt.headers == event.headers
+            for evt in run.events
+        )
+        if not duplicate:
+            run.events.append(event)
 
-        run.events.append(event)
+        key = conn_key or f"http:{server}:{port}:{proto_str}"
+        conn = self._get_network_conn(run, pos, key)
+        conn.kind = "http"
+        if not conn.target:
+            conn.target = server or ""
+        if port and conn.port is None:
+            conn.port = port
+        conn.proto = proto_str
+        verb = (method or _http_method_from_headers(headers) or "").upper() or None
+        if verb and not conn.method:
+            conn.method = verb
+        conn.bytes_sent += len(body or b"")
+
+    def record_http_response_event(self, run, pos: TracePosition, server, port, data=b"", secure=False, conn_key=None):
+        """
+        Fold bytes read from an HTTP response (InternetReadFile/WinHttpReadData)
+        into the matching connection record without emitting a timeline event.
+        """
+        proto_str = "https" if secure else "http"
+        key = conn_key or f"http:{server}:{port}:{proto_str}"
+        conn = self._get_network_conn(run, pos, key)
+        conn.kind = "http"
+        if not conn.target:
+            conn.target = server or ""
+        if port and conn.port is None:
+            conn.port = port
+        if not conn.proto:
+            conn.proto = proto_str
+        self._record_inbound(conn, data or b"")
 
     def record_dyn_code_event(self, run, tag, base, size):
         """
@@ -628,10 +770,21 @@ class Profiler:
             run.dyn_code["base_addrs"].add(base)
 
     def record_network_event(
-        self, run, pos: TracePosition, server, port, typ="unknown", proto="unknown", data=b"", method=""
+        self,
+        run,
+        pos: TracePosition,
+        server,
+        port,
+        typ="unknown",
+        proto="unknown",
+        data=b"",
+        method="",
+        conn_key=None,
     ):
         """
-        Log network activity for an emulation run
+        Log network activity for an emulation run and fold it into the
+        per-connection record identified by ``conn_key`` (the emulated socket
+        handle) or, when absent, the endpoint tuple.
         """
         data_ref = self.put_binary_data(data or b"", limit=0x3000)
 
@@ -645,6 +798,63 @@ class Profiler:
             method=method if method else None,
         )
         run.events.append(event)
+
+        key = conn_key or f"sock:{server}:{port}:{proto}"
+        conn = self._get_network_conn(run, pos, key)
+        if not conn.target:
+            self._link_dns_target(run, conn, server)
+            if not conn.target:
+                conn.target = server or ""
+        if port and conn.port is None:
+            conn.port = port
+        if proto != "unknown" and not conn.proto:
+            conn.proto = proto
+        if typ in ("connect", "bind", "accept"):
+            conn.kind = typ
+        elif typ == "data_out":
+            conn.bytes_sent += len(data or b"")
+        elif typ == "data_in":
+            self._record_inbound(conn, data or b"")
+
+    def build_network_connections(self, run: Run) -> list[NetworkConnection]:
+        """
+        Fold a run's recorded network actions into ordered connection records.
+        """
+        connections: list[NetworkConnection] = []
+        for index, conn in enumerate(run.network_conns.values(), start=1):
+            if not conn.resolved:
+                status = NETCONN_UNRESOLVED
+            elif conn.bytes_recv:
+                status = NETCONN_OK
+            else:
+                status = NETCONN_NO_DATA
+
+            response = None
+            if conn.recv_buffer:
+                raw = bytes(conn.recv_buffer)
+                response = NetworkResponseSummary(
+                    preview=_preview_network_data(raw),
+                    data_ref=self.put_binary_data(raw),
+                )
+
+            connections.append(
+                NetworkConnection(
+                    connection_id=f"conn-{index}",
+                    target=conn.target or "unknown",
+                    port=conn.port,
+                    proto=conn.proto,
+                    kind=conn.kind,
+                    method=conn.method,
+                    dns_query=conn.dns_query,
+                    tid=conn.tid or None,
+                    pid=conn.pid or None,
+                    bytes_sent=conn.bytes_sent,
+                    bytes_recv=conn.bytes_recv,
+                    status=status,
+                    response=response,
+                )
+            )
+        return connections
 
     def record_exception_event(
         self,
@@ -697,6 +907,10 @@ class Profiler:
             events = None
             if r.events:
                 events = list(r.events)
+
+            network_connections = None
+            if r.network_conns:
+                network_connections = self.build_network_connections(r)
 
             sym_accesses: list[SymAccessReport] | None = None
             if r.sym_access:
@@ -792,6 +1006,7 @@ class Profiler:
                 ret_val=r.ret_val,
                 error=error_info,
                 events=events,
+                network_connections=network_connections,
                 sym_accesses=sym_accesses,
                 dynamic_code_segments=dyn_code_segments,
                 coverage=sorted(r.coverage) if r.coverage else None,

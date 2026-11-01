@@ -520,6 +520,111 @@ class MemoryLayout(BaseModel):
     )
 
 
+class NetworkResponseSummary(BaseModel):
+    """Summarizes the bytes received on one network connection.
+
+    The summary is assembled from inbound traffic (raw socket reads or HTTP
+    response reads) observed during the run. Full captured bytes resolve
+    through ``data_ref``; ``preview`` gives a quick printable glimpse.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    preview: str | None = Field(
+        default=None,
+        description=(
+            "Printable rendering of the first received bytes, with non-printable "
+            "characters replaced by ``.``.\n\n"
+            "Use this to recognize HTTP responses, shellcode markers, or plaintext "
+            "protocols without resolving ``data_ref``."
+        ),
+    )
+    data_ref: str | None = Field(
+        default=None,
+        description=(
+            "Reference into the top-level report ``data`` store for the captured "
+            "inbound bytes.\n\n"
+            "The capture is length-capped, while ``NetworkConnection.bytes_recv`` "
+            "always reflects the full observed byte count."
+        ),
+    )
+
+
+class NetworkConnection(BaseModel):
+    """Groups all network activity for one connection within a run.
+
+    Raw socket activity and WinInet/WinHTTP request/response pairs are each
+    folded into one entry keyed by the emulated socket or request handle. A
+    DNS lookup that resolves a connected IP is folded into the matching entry,
+    so a download chain can be read as one record.
+
+    Entries are retained even when the lookup failed or no response bytes were
+    received; inspect ``status`` to tell those cases apart.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connection_id: str = Field(
+        description=(
+            "Stable per-run identifier (for example ``conn-1``).\n\n"
+            "Ids follow first-seen order of the connection in the event stream."
+        )
+    )
+    target: str = Field(
+        description=(
+            "Connection target: the queried hostname when DNS resolution linked "
+            "a name to the traffic, otherwise the raw IP address.\n\n"
+            "For DNS-only failure entries this is the queried name."
+        )
+    )
+    port: int | None = Field(default=None, description="Remote port, when the connection reached a port.")
+    proto: str | None = Field(
+        default=None,
+        description="Protocol label such as ``tcp``, ``udp``, ``http``, ``https``, or ``dns``.",
+    )
+    kind: str = Field(
+        description=(
+            "How the connection was initiated: ``connect``, ``bind``, ``accept``, "
+            "``http``, ``dns``, or ``traffic`` for data without an explicit setup call."
+        )
+    )
+    method: str | None = Field(
+        default=None,
+        description="HTTP request method (``GET``, ``POST``, ...) for HTTP connections.",
+    )
+    dns_query: str | None = Field(
+        default=None,
+        description="Domain queried to resolve ``target``, when a DNS event was correlated with this connection.",
+    )
+    tid: int | None = Field(
+        default=None,
+        description="Identifier of the thread that initiated the connection.",
+    )
+    pid: int | None = Field(
+        default=None,
+        description="Identifier of the process that initiated the connection.",
+    )
+    bytes_sent: int = Field(
+        default=0,
+        description="Cumulative outbound bytes observed on the connection.",
+    )
+    bytes_recv: int = Field(
+        default=0,
+        description="Cumulative inbound bytes observed on the connection.",
+    )
+    status: str = Field(
+        description=(
+            "Connection outcome: ``ok`` when inbound bytes were received, "
+            "``no_data`` when the connection was used but nothing came back, "
+            "or ``unresolved`` for a DNS lookup that returned no address."
+        )
+    )
+    response: NetworkResponseSummary | None = Field(
+        default=None,
+        description="Summary of received bytes, present only when ``bytes_recv`` is non-zero.",
+    )
+
+
 class EntryPoint(BaseModel):
     """Represents one emulation execution primitive captured as a run.
 
@@ -598,6 +703,14 @@ class EntryPoint(BaseModel):
             "Chronological event stream emitted during this run.\n\n"
             "Event contents are produced by API, process, file, registry, network, "
             "and exception recorders."
+        ),
+    )
+    network_connections: list[NetworkConnection] | None = Field(
+        default=None,
+        description=(
+            "Network activity from ``events`` folded into per-connection records.\n\n"
+            "Each entry groups DNS lookup, connect, sends, receives, and HTTP "
+            "request/response for one connection, including failed or unanswered ones."
         ),
     )
     sym_accesses: list[SymAccessReport] | None = Field(

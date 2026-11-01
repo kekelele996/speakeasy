@@ -64,6 +64,19 @@ payload is omitted for purely local operations, so a populated `pid` means the o
 crossed a process boundary. Thread events still report `tid` for the created or injected
 thread, even for a local create.
 
+## Network connections
+
+The `net_dns`, `net_traffic`, and `net_http` events stay chronological, but a download chain
+normally scatters one connection across several of them (name lookup, connect, send, receive).
+Each entry point therefore also carries `network_connections`, which folds every network action
+of the run into one record per emulated socket or HTTP request handle:
+
+- `target` is the queried hostname when a DNS answer linked the name to the traffic, otherwise the raw IP.
+- `method` holds the HTTP verb (`GET`, `POST`, ...); `kind` tells how the connection started (`connect`, `bind`, `accept`, `http`, `dns`).
+- `bytes_sent` / `bytes_recv` accumulate the full observed lengths; `response` adds a printable `preview` and a capped `data_ref` of the inbound bytes.
+- `tid` / `pid` identify the initiating thread and process.
+- Records are kept for unanswered connections too: `status` is `ok`, `no_data` (used but nothing received), or `unresolved` (a standalone DNS lookup with no answer).
+
 ## Report fields to recipe flags
 
 - top-level `strings` is controlled by `--analysis-strings` / `--no-analysis-strings` ([recipe](cli-analysis-recipes.md#recipe-analysis-strings)).
@@ -78,7 +91,7 @@ thread, even for a local create.
 ```jsonc
 {
   // Report format version.
-  "report_version": "5.0.0",
+  "report_version": "5.1.0",
 
   // Total wall-clock runtime in seconds.
   "emulation_total_runtime": 1.234,
@@ -344,6 +357,43 @@ thread, even for a local create.
           "exception_code": "0x80000003",
           "handler_address": "0x401500",
           "registers": {"eax": "0x0", "ebx": "0x0"}
+        }
+      ],
+
+      // Network actions folded per connection (socket or HTTP request handle).
+      "network_connections": [
+        {
+          "connection_id": "conn-1",
+          // Hostname from the DNS answer, not the raw IP.
+          "target": "example.org",
+          "port": 443,
+          "proto": "https",
+          "kind": "http",
+          "method": "GET",
+          "dns_query": "example.org",
+          "tid": 2000,
+          "pid": 1337,
+          "bytes_sent": 0,
+          "bytes_recv": 4096,
+          "status": "ok",
+          // Printable preview plus a capped capture in the top-level data store.
+          "response": {"preview": "MZ....", "data_ref": "data-http-response"}
+        },
+        {
+          // A connection that was used but never answered is still listed.
+          "connection_id": "conn-2",
+          "target": "10.1.2.3",
+          "port": 8080,
+          "proto": "tcp",
+          "kind": "connect",
+          "method": null,
+          "dns_query": null,
+          "tid": 2000,
+          "pid": 1337,
+          "bytes_sent": 16,
+          "bytes_recv": 0,
+          "status": "no_data",
+          "response": null
         }
       ],
 
