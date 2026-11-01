@@ -1,7 +1,7 @@
 from base64 import b64encode
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, model_validator
 
 from speakeasy.profiler_events import AnyEvent
 
@@ -771,4 +771,61 @@ class FileManifestEntry(BaseModel):
     )
     sha256: str = Field(
         description=("SHA-256 hash of the archived file bytes.\n\nSupports integrity checks and IOC correlation.")
+    )
+
+
+class DataBundleEntry(BaseModel):
+    """Manifest entry describing one decoded payload in a data bundle.
+
+    Data bundles export the content-addressed payloads referenced by a run
+    record through ``data_ref``/``body_ref`` fields. Each unique payload is
+    stored once under ``file_name`` as plain bytes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        description=(
+            "SHA-256 digest of the decoded payload bytes.\n\n"
+            "Matches the payload's key in the top-level report ``data`` store."
+        ),
+    )
+    size: int = Field(
+        ge=0,
+        description="Uncompressed payload length in bytes.\n\nRecomputed from the bundled bytes on readback.",
+    )
+    file_name: str = Field(
+        description="Zip member path that holds the raw payload bytes inside the bundle.",
+    )
+    sources: list[str] = Field(
+        min_length=1,
+        description=(
+            "Dotted report paths that reference this payload, for example "
+            "``entry_points[0].events[3].data_ref`` or "
+            "``entry_points[0].memory.layout[1].data_ref``."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_file_name(self) -> "DataBundleEntry":
+        if self.file_name != f"blobs/{self.sha256}.bin":
+            raise ValueError("file_name must be blobs/<sha256>.bin and match the entry digest")
+        return self
+
+
+class DataBundleManifest(BaseModel):
+    """Top-level manifest stored as ``speakeasy_data_manifest.json`` in a data bundle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_type: Literal["speakeasy_data_bundle"] = Field(
+        description="Fixed bundle type tag used to recognize the package.",
+    )
+    bundle_version: str = Field(
+        description="Bundle format version.",
+    )
+    entries: list[DataBundleEntry] = Field(
+        default_factory=list,
+        description="One entry per unique referenced payload, in first-reference order.",
     )

@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from speakeasy import Win32Emulator, WinKernelEmulator
 from speakeasy.cli_config import output_active_config
 from speakeasy.config import SpeakeasyConfig, get_default_config_dict
+from speakeasy.data_bundle import DataBundle, build_data_bundle, read_data_bundle
 from speakeasy.errors import ConfigError, NotSupportedError, SpeakeasyError
 from speakeasy.report import FileManifestEntry, Report
 from speakeasy.volumes import apply_volumes
@@ -778,6 +779,41 @@ class Speakeasy:
             zf.writestr("speakeasy_manifest.json", manifest_json)
 
         return _zip.getvalue()
+
+    @check_init
+    def create_data_archive(self) -> bytes:
+        """
+        Create a zip bundle of every binary payload referenced by the report.
+
+        The bundle stores each unique payload (memory snapshots, captured
+        file/registry bytes, network data) once as plain decoded bytes, keyed
+        by SHA-256, alongside ``speakeasy_data_manifest.json``. The manifest
+        records each payload's digest, length, and the report paths that
+        reference it.
+
+        return:
+            Zip archive bytes, or an empty bytes object when the report has no
+            payload data.
+        """
+        report = self.get_report()
+        if not report.data:
+            return b""
+        return build_data_bundle(report)
+
+    @staticmethod
+    def read_data_archive(data: bytes, report: Report | dict | None = None) -> DataBundle:
+        """
+        Read back a data archive and verify its manifest and payload blobs.
+
+        args:
+            data: Zip archive bytes produced by ``create_data_archive``.
+            report: Optional report (model or dict) to cross-check the
+                manifest against; every reference in it must be covered.
+
+        return:
+            A verified DataBundle exposing the manifest and payload bytes.
+        """
+        return read_data_bundle(data, report=report)
 
     def get_mem_maps(self) -> list:
         """

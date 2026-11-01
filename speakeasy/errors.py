@@ -99,3 +99,11 @@ class ConfigError(SpeakeasyError):
     """
 
     pass
+
+
+class DataBundleError(SpeakeasyError):
+    """
+    Raised when a report data bundle cannot be built or fails verification
+    """
+
+    pass
