@@ -150,6 +150,9 @@ class SessionManager:
         self.window_classes.update({atom: wc})
         if class_name:
             self.window_classes.update({class_name: wc})
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.created("gui", atom, wc, name=class_name)
         return atom
 
     def create_window(self, window_name=None, class_name=None, style=0, parent=0, thread_id=0, process_id=0):
@@ -158,12 +161,34 @@ class SessionManager:
         self.windows.update({hnd: wc})
         if window_name:
             self.windows.update({window_name: wc})
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.created("gui", hnd, wc, name=window_name or class_name)
         return hnd
 
+    def close_window(self, handle) -> bool:
+        """Destroy a guest-created window and retire its audit binding."""
+        window = self.windows.get(handle)
+        if not isinstance(window, Window):
+            return False
+        self.windows.pop(handle, None)
+        if window.name and self.windows.get(window.name) is window:
+            self.windows.pop(window.name, None)
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.closed("gui", handle, api="DestroyWindow")
+        return True
+
     def get_window_class(self, atom):
+        audit = getattr(self.allocator, "auditor", None)
+        if audit and isinstance(atom, int):
+            audit.touch("gui", atom)
         return self.window_classes.get(atom)
 
     def get_window(self, handle):
+        audit = getattr(self.allocator, "auditor", None)
+        if audit and isinstance(handle, int):
+            audit.touch("gui", handle)
         return self.windows.get(handle)
 
     def get_device_context(self):

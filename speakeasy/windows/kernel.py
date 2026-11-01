@@ -485,6 +485,7 @@ class WinKernelEmulator(WindowsEmulator, IoManager):
     def on_run_complete(self):
         if self.curr_run is not None:
             self.curr_run.ret_val = self.get_return_val()
+            self.handle_audit.end_run(self.curr_run)
 
         for drv in self.drivers:
             drv.read_back()

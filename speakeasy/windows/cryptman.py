@@ -40,14 +40,22 @@ class CryptContext:
         key = CryptKey(blob_type, blob, blob_len, hnd_import_key, param_list, flags)
         hnd = self.get_handle()
         self.keys.update({hnd: key})
-
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.created("crypt", hnd, key)
         return hnd
 
     def get_key(self, hnd):
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.touch("crypt", hnd)
         return self.keys.get(hnd, None)
 
-    def delete_key(self, hnd):
+    def delete_key(self, hnd, api=None):
         self.keys.pop(hnd)
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.closed("crypt", hnd, api=api or "CryptDestroyKey")
 
 
 class CryptoManager:
@@ -66,10 +74,19 @@ class CryptoManager:
         hnd = ctx.get_handle()
 
         self.ctx_handles.update({hnd: ctx})
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.created("crypt", hnd, ctx)
         return hnd
 
-    def crypt_close(self, hnd):
+    def crypt_close(self, hnd, api=None):
         self.ctx_handles.pop(hnd, None)
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.closed("crypt", hnd, api=api or "CryptReleaseContext")
 
     def crypt_get(self, hnd):
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.touch("crypt", hnd)
         return self.ctx_handles.get(hnd, None)

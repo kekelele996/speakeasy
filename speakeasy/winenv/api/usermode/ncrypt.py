@@ -100,7 +100,7 @@ class Ncrypt(api.ApiHandler):
         for hnd, crypt_ctx in cm.ctx_handles.items():
             hnd_key = crypt_ctx.get_key(hKey)
             if hnd_key:
-                crypt_ctx.delete_key(hKey)
+                crypt_ctx.delete_key(hKey, api="NCryptDeleteKey")
                 break
 
         return windefs.ERROR_SUCCESS
@@ -118,10 +118,10 @@ class Ncrypt(api.ApiHandler):
         # hObject can be a handle to a provider or key
         for hnd, crypt_ctx in cm.ctx_handles.items():
             if hnd == hObject:
-                cm.crypt_close(hObject)
+                cm.crypt_close(hObject, api="NCryptFreeObject")
                 break
             elif crypt_ctx.get_key(hObject):
-                crypt_ctx.delete_key(hObject)
+                crypt_ctx.delete_key(hObject, api="NCryptFreeObject")
                 break
 
         return windefs.ERROR_SUCCESS

@@ -52,6 +52,7 @@ from speakeasy.windows.cryptman import CryptoManager
 from speakeasy.windows.driveman import DriveManager
 from speakeasy.windows.fileman import File, FileManager
 from speakeasy.windows.hammer import ApiHammer
+from speakeasy.windows.handle_audit import HandleAuditor
 from speakeasy.windows.ioman import IoManager
 from speakeasy.windows.loaders import LoadState, PeLoader, RuntimeModule, get_prot_string, relocate_image
 from speakeasy.windows.module_loader import ModuleLoader
@@ -340,6 +341,10 @@ class WindowsEmulator(BinaryEmulator):
         self.api_registry: ApiRegistry = ApiRegistry(self)
         self._native_exit: NativeExit | None = None
         self._api_call_site: tuple[int, int] | None = None
+        # Guest-side call site of the API currently being dispatched
+        self._audit_call_pc: int = 0
+        # Name (dll.Api) of the API currently being dispatched
+        self._audit_api_name: str | None = None
         # Guard pages, mapped without access, with the protection their first access restores
         self.guard_pages: dict[int, int] = {}
         self.hardware_breakpoints = hardware_breakpoints.HardwareBreakpoints(self)
@@ -382,6 +387,9 @@ class WindowsEmulator(BinaryEmulator):
 
         self.wintypes = windef
         self.handle_allocator: HandleAllocator = HandleAllocator()
+        # Handle/object lifecycle audit, shared with every resource manager
+        self.handle_audit: HandleAuditor = HandleAuditor(self)
+        self.handle_allocator.auditor = self.handle_audit
         # OS resource managers
         self.regman: RegistryManager = RegistryManager(
             self.handle_allocator, self.config.registry, os_ver=self.config.os_ver
@@ -771,6 +779,7 @@ class WindowsEmulator(BinaryEmulator):
         self._seh_repeat_count = 0
         self._seh_resume_pc = None
         self.curr_mod = self.get_module_from_addr(run.start_addr)
+        self.handle_audit.begin_run(run)
         if self.profiler:
             self.profiler.add_run(run)
 
@@ -2800,7 +2809,14 @@ class WindowsEmulator(BinaryEmulator):
         """
         frame = GuestCallbackFrame(self.get_stack_ptr(), self.get_ret_address())
         previous = self._active_api_frame
+        previous_call_pc = self._audit_call_pc
+        previous_api_name = self._audit_api_name
         self._active_api_frame = frame
+        self._audit_api_name = None
+        # The guest instruction that made the call: prev_pc for registered
+        # traps, the return address for syscall-style traps (same rule used
+        # for call_pc below).
+        self._audit_call_pc = self.prev_pc or self.get_ret_address()
         origin_run = self.curr_run
         entry_pc = self.get_pc()
         try:
@@ -2821,6 +2837,8 @@ class WindowsEmulator(BinaryEmulator):
                 self.end_run_on_fault()
         finally:
             self._active_api_frame = previous
+            self._audit_call_pc = previous_call_pc
+            self._audit_api_name = previous_api_name
 
     def _call_api_implementation(self, dll: str, name: str, frame: GuestCallbackFrame) -> None:
         """Find the code for the API and run it. Then check the API count limit."""
@@ -2837,9 +2855,11 @@ class WindowsEmulator(BinaryEmulator):
         )
         impl = self.resolve_api_implementation(dll, name)
         api_name = call.api_name
+        self._audit_api_name = api_name
         match impl:
             case api_resolution.HandlerImplementation():
                 api_name = f"{dll}.{impl.name}"
+                self._audit_api_name = api_name
                 if not self._handle_api_with_handler(call, impl):
                     return
             case api_resolution.UserHookImplementation():

@@ -520,6 +520,84 @@ class MemoryLayout(BaseModel):
     )
 
 
+class HandleAuditSummary(BaseModel):
+    """Per-process / per-module handle lifecycle counts captured at run end.
+
+    ``created`` and ``closed`` count handle bindings whose lifecycle event
+    happened during the run; ``remaining`` counts bindings still open at run
+    end, attributed to the process/module that opened them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    process_id: int | None = Field(default=None, description="Owning process id, or null for kernel/driver context.")
+    process_name: str | None = Field(
+        default=None, description="Owning process image name, or ``Kernel`` for driver runs."
+    )
+    module: str | None = Field(default=None, description="Guest module that opened the handles in this row.")
+    object_type: str = Field(description="Managed object type, e.g. File, RegKey, Event, Socket.")
+    created: int = Field(description="Handles of this type opened during the run.")
+    closed: int = Field(description="Handles of this type closed during the run.")
+    remaining: int = Field(description="Handles of this type still open when the run ended.")
+
+
+class UnclosedHandle(BaseModel):
+    """One handle binding that was still open when a run ended.
+
+    Bindings are generation-scoped, so a value that the allocator reused after
+    a close keeps the old and the new object on separate records.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    namespace: str = Field(
+        description=(
+            "Resource manager namespace: kernel, file, pipe, filemap, registry, "
+            "crypt, socket, wininet, gui, or snapshot."
+        )
+    )
+    handle: HexInt = Field(description="Handle value.")
+    generation: int = Field(
+        description="1-based generation of this binding; reused handle values get a new generation."
+    )
+    object_type: str = Field(description="Object class behind the handle (File, Mutant, RegKey, ...).")
+    name: str | None = Field(default=None, description="Object name or path when the manager assigned one.")
+    process_id: int | None = Field(default=None, description="Process that opened the handle.")
+    process_name: str | None = Field(default=None, description="Image name of the owning process.")
+    owner_module: str | None = Field(default=None, description="Module that opened the handle.")
+    last_holder_process_id: int | None = Field(default=None, description="Process that last referenced the handle.")
+    last_holder_process_name: str | None = Field(default=None, description="Image name of the last holding process.")
+    last_holder_module: str | None = Field(default=None, description="Module that last referenced the handle.")
+    last_holder_thread_id: int | None = Field(default=None, description="Thread that last referenced the handle.")
+    opened_in_run: int | None = Field(
+        default=None, description="Ordinal of the run during which the handle was opened."
+    )
+    create_api: str | None = Field(default=None, description="API that opened the handle, when known.")
+
+
+class HandleAuditReport(BaseModel):
+    """Handle lifecycle audit snapshot attached to each run record.
+
+    Use ``summary`` to spot object types whose ``remaining`` count never drops
+    to zero, and ``unclosed`` to identify the owner and last holder of each
+    leaked handle without paging through raw open/close events.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    created: int = Field(description="Guest-owned handles opened during this run.")
+    closed: int = Field(description="Guest-owned handles closed during this run.")
+    remaining: int = Field(description="Guest-owned handles still open when this run ended.")
+    summary: list[HandleAuditSummary] = Field(
+        default_factory=list,
+        description="Created/closed/remaining counts grouped by process, owning module and object type.",
+    )
+    unclosed: list[UnclosedHandle] = Field(
+        default_factory=list,
+        description="Open handle bindings at run end, with owner and last-holder details.",
+    )
+
+
 class EntryPoint(BaseModel):
     """Represents one emulation execution primitive captured as a run.
 
@@ -633,6 +711,13 @@ class EntryPoint(BaseModel):
         description=(
             "Optional memory and module snapshot captured at run completion.\n\n"
             "Populate this when memory-layout capture is active for the emulator mode."
+        ),
+    )
+    handle_audit: HandleAuditReport | None = Field(
+        default=None,
+        description=(
+            "Per-process/module tally of handles opened and closed during the run and "
+            "the bindings still open at run end, with last-holder details."
         ),
     )
 

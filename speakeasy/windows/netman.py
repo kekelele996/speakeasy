@@ -237,6 +237,9 @@ class WininetSession(WininetComponent):
         req = WininetRequest(self.allocator, self, verb, objname, ver, ref, accepts, flags, ctx)
         hdl = req.get_handle()
         self.requests.update({hdl: req})
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.created("wininet", hdl, req)
         return req
 
 
@@ -254,6 +257,9 @@ class WininetInstance(WininetComponent):
         sess = WininetSession(self.allocator, self, server, port, user, password, service, flags, ctx)
         hdl = sess.get_handle()
         self.sessions.update({hdl: sess})
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.created("wininet", hdl, sess)
         return sess
 
 
@@ -288,6 +294,9 @@ class NetworkManager:
                 sock.fill_recv_queue(responses)
 
         self.sockets.update({fd: sock})
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.created("socket", fd, sock)
         return sock
 
     def name_lookup(self, domain):
@@ -330,25 +339,51 @@ class NetworkManager:
         wini = WininetInstance(self.allocator, user_agent, access, proxy, bypass, flags)
 
         self.wininets.update({wini.get_handle(): wini})
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.created("wininet", wini.get_handle(), wini)
         return wini
 
     def get_wininet_object(self, handle):
-        for hinst, inst in self.wininets.items():
-            if hinst == handle:
-                return inst
-            for hsess, sess in inst.sessions.items():
-                if hsess == handle:
-                    return sess
-                for hreq, req in sess.requests.items():
-                    if hreq == handle:
-                        return req
+        audit = getattr(self.allocator, "auditor", None)
+        if hinst := self.wininets.get(handle):
+            if audit:
+                audit.touch("wininet", handle)
+            return hinst
+        for inst in self.wininets.values():
+            if hsess := inst.sessions.get(handle):
+                if audit:
+                    audit.touch("wininet", handle)
+                return hsess
+            for sess in inst.sessions.values():
+                if hreq := sess.requests.get(handle):
+                    if audit:
+                        audit.touch("wininet", handle)
+                    return hreq
 
-    def close_wininet_object(self, handle):
-        if self.wininets.get(handle):
-            self.wininets.pop(handle)
+    def close_wininet_object(self, handle, api=None):
+        obj = self.get_wininet_object(handle)
+        if obj is None:
+            return False
+        if isinstance(obj, WininetInstance):
+            self.wininets.pop(handle, None)
+        elif isinstance(obj, WininetSession):
+            obj.instance.sessions.pop(handle, None)
+        else:
+            obj.session.requests.pop(handle, None)
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.closed("wininet", handle, api=api or "InternetCloseHandle")
+        return True
 
     def get_socket(self, fd):
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.touch("socket", fd)
         return self.sockets.get(fd)
 
     def close_socket(self, fd):
         self.sockets.pop(fd)
+        audit = getattr(self.allocator, "auditor", None)
+        if audit:
+            audit.closed("socket", fd, api="closesocket")

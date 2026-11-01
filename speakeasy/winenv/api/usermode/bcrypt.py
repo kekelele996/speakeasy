@@ -131,7 +131,7 @@ class Bcrypt(api.ApiHandler):
         cm = emu.get_crypt_manager()
         if not cm.crypt_get(hAlgorithm):
             return ntdefs.STATUS_INVALID_HANDLE
-        cm.crypt_close(hAlgorithm)
+        cm.crypt_close(hAlgorithm, api="BCryptCloseAlgorithmProvider")
 
         return ntdefs.STATUS_SUCCESS
 
@@ -384,7 +384,7 @@ class Bcrypt(api.ApiHandler):
         for hnd, crypt_ctx in cm.ctx_handles.items():
             hnd_key = crypt_ctx.get_key(hKey)
             if hnd_key:
-                crypt_ctx.delete_key(hKey)
+                crypt_ctx.delete_key(hKey, api="BCryptDestroyKey")
                 return ntdefs.STATUS_SUCCESS
 
         return ntdefs.STATUS_INVALID_HANDLE

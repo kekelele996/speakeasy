@@ -182,9 +182,15 @@ class RegistryManager:
             path = regdefs.get_hkey_type(hk)
             key = self.create_key(path)
             self.reg_handles.update({hk: key})
+            audit = getattr(self.allocator, "auditor", None)
+            if audit:
+                audit.created("registry", hk, key, name=key.get_path(), system=True)
 
         if os_ver:
             self.add_default_values(CURRENT_VERSION_KEY, get_current_version_values(os_ver))
+
+    def _audit(self):
+        return getattr(self.allocator, "auditor", None)
 
     def add_default_values(self, path, values):
         """
@@ -211,7 +217,11 @@ class RegistryManager:
         return path
 
     def get_key_from_handle(self, handle):
-        return self.reg_handles.get(regdefs.normalize_hkey(handle))
+        handle = regdefs.normalize_hkey(handle)
+        audit = self._audit()
+        if audit:
+            audit.touch("registry", handle)
+        return self.reg_handles.get(handle)
 
     def close_key(self, handle) -> bool:
         handle = regdefs.normalize_hkey(handle)
@@ -219,6 +229,9 @@ class RegistryManager:
             return False
         if handle not in (HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS):
             del self.reg_handles[handle]
+            audit = self._audit()
+            if audit:
+                audit.closed("registry", handle, api="RegCloseKey")
         return True
 
     def get_key_from_path(self, path):
@@ -304,11 +317,14 @@ class RegistryManager:
         """
         hnd = None
         path = self.normalize_reg_path(path)
+        audit = self._audit()
         # Does the key already exist?
         key = self.get_key_from_path(path)
         if key:
             hnd = key.get_handle()
             self.reg_handles.update({hnd: key})
+            if audit:
+                audit.created("registry", hnd, key)
             return hnd
 
         # Does this key exist in our config
@@ -317,6 +333,8 @@ class RegistryManager:
             self.keys.append(key)
             hnd = key.get_handle()
             self.reg_handles.update({hnd: key})
+            if audit:
+                audit.created("registry", hnd, key)
             return hnd
 
         # If we are instructed to create the key, do so
@@ -325,4 +343,6 @@ class RegistryManager:
             hnd = key.get_handle()
             self.reg_handles.update({hnd: key})
             self.keys.append(key)
+            if audit:
+                audit.created("registry", hnd, key)
         return hnd

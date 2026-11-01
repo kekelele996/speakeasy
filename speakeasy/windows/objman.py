@@ -25,6 +25,7 @@ STD_HANDLE_ATTRS = {0xFFFFFFF6: "stdin", 0xFFFFFFF5: "stdout", 0xFFFFFFF4: "stde
 
 class HandleAllocator:
     def __init__(self):
+        self.auditor: Any | None = None
         self._kernel_object_handle: int = 0x220
         self._kernel_object_id: int = 0x400
         self._console_handle: int = 0x340
@@ -133,6 +134,9 @@ class KernelObject:
     def get_handle(self):
         tmp = self.emu.handle_allocator.allocate_kernel_object_handle()
         self.handles.append(tmp)
+        audit = getattr(self.emu, "handle_audit", None)
+        if audit:
+            audit.created("kernel", tmp, self)
         return tmp
 
 
@@ -882,6 +886,9 @@ class ObjectManager:
                 break
         if addr:
             self.objects.pop(addr)
+            audit = getattr(self.emu, "handle_audit", None)
+            if audit:
+                audit.release_object("kernel", list(obj.handles))
 
     def dec_ref(self, obj):
         """
@@ -896,6 +903,9 @@ class ObjectManager:
     def get_handle(self, obj):
         tmp = self.new_handle()
         obj.handles.append(tmp)
+        audit = getattr(self.emu, "handle_audit", None)
+        if audit:
+            audit.created("kernel", tmp, obj)
         return tmp
 
     def new_handle(self) -> int:
@@ -934,4 +944,7 @@ class ObjectManager:
     def get_object_from_handle(self, handle):
         for a, o in self.objects.items():
             if handle in o.handles:
+                audit = getattr(self.emu, "handle_audit", None)
+                if audit:
+                    audit.touch("kernel", handle)
                 return o

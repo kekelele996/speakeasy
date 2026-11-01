@@ -628,6 +628,9 @@ class Kernel32(ExceptionApis, api.ApiHandler):
                 }
             }
         )
+        emu.handle_audit.created(
+            "snapshot", hnd, object_type="Toolhelp32Snapshot", name=f"flags=0x{dwFlags:x}"
+        )
 
         cap_def = k32types.get_flag_defines(dwFlags, "TH32CS")
         if cap_def:
@@ -4906,6 +4909,7 @@ class Kernel32(ExceptionApis, api.ApiHandler):
         (hObject,) = argv
 
         if self.snapshots.pop(hObject, None) is not None:
+            emu.handle_audit.closed("snapshot", hObject, api="CloseHandle")
             emu.set_last_error(windefs.ERROR_SUCCESS)
             return 1
 
@@ -4914,8 +4918,13 @@ class Kernel32(ExceptionApis, api.ApiHandler):
             emu.set_last_error(windefs.ERROR_INVALID_HANDLE)
             return 0
 
+        # Files, pipes and mappings keep working after close in the emulation,
+        # but the audit records the guest-side release.
+        emu.fileman.close_handle(hObject)
+
         obj = self.get_object_from_handle(hObject)
         if obj:
+            emu.handle_audit.closed("kernel", hObject, api="CloseHandle")
             emu.dec_ref(obj)
             emu.set_last_error(windefs.ERROR_SUCCESS)
             return 1

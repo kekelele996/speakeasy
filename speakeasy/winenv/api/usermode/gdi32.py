@@ -54,7 +54,20 @@ class GDI32(api.ApiHandler):
     def get_handle(self):
         self.handle += 4
         hnd = self.handle
+        audit = getattr(self.emu, "handle_audit", None)
+        if audit:
+            api_name = getattr(self.emu, "_audit_api_name", None)
+            audit.created("gdi", hnd, object_type=self._audit_object_type(), name=api_name)
         return hnd
+
+    def _audit_object_type(self):
+        api = getattr(self.emu, "_audit_api_name", "") or ""
+        name = api.rsplit(".", 1)[-1]
+        if name.startswith("Create"):
+            name = name[len("Create") :]
+        if len(name) > 1 and name.endswith(("A", "W")):
+            name = name[:-1]
+        return name or "GdiObject"
 
     @apihook("CreateBitmap", argc=5)
     def CreateBitmap(self, emu, argv, ctx: api.ApiContext = api.NO_CONTEXT):
@@ -200,6 +213,8 @@ class GDI32(api.ApiHandler):
         HGDIOBJ ho
         );
         """
+        (ho,) = argv
+        emu.handle_audit.closed("gdi", ho, api="DeleteObject")
         return 1
 
     @apihook("CreateCompatibleBitmap", argc=3)

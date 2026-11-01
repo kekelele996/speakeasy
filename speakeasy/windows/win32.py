@@ -729,6 +729,7 @@ class Win32Emulator(WindowsEmulator):
             if self.profiler:
                 self.profiler.record_dropped_files_event(run, self.get_dropped_files())
                 self._capture_memory_layout(run)
+            self.handle_audit.end_run(run)
 
         return self._prepare_next_run()
 

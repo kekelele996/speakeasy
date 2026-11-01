@@ -484,6 +484,8 @@ class User32(api.ApiHandler):
             HWND hWnd
         );
         """
+        (hWnd,) = argv
+        self.sessman.close_window(hWnd)
         return True
 
     @apihook("DefWindowProc", argc=4)

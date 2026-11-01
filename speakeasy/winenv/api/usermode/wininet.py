@@ -412,7 +412,7 @@ class Wininet(api.ApiHandler):
         (hInternet,) = argv
         rv = True
 
-        self.netman.close_wininet_object(hInternet)
+        self.netman.close_wininet_object(hInternet, api="InternetCloseHandle")
 
         return rv
 

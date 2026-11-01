@@ -1699,7 +1699,9 @@ class AdvApi32(api.ApiHandler):
             return 0
 
         hnd = self.get_handle()
-        self.hash_objects.update({hnd: hash_algs[Algid][1]()})
+        alg = hash_algs[Algid][1]()
+        self.hash_objects.update({hnd: alg})
+        emu.handle_audit.created("hash", hnd, object_type="CryptHash", name=hash_algs[Algid][0])
         self.mem_write(phHash, hnd.to_bytes(self.get_ptr_size(), "little"))
         return 1
 
@@ -1774,6 +1776,9 @@ class AdvApi32(api.ApiHandler):
           HCRYPTHASH hHash
         );
         """
+        (hHash,) = argv
+        if self.hash_objects.pop(hHash, None) is not None:
+            emu.handle_audit.closed("hash", hHash, api="CryptDestroyHash")
         return 1
 
     @apihook("CryptDeriveKey", argc=5)

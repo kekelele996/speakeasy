@@ -405,6 +405,9 @@ class WinHttp(api.ApiHandler):
           HINTERNET hInternet
         );
         """
+        (hInternet,) = argv
         rv = 1
+
+        self.netman.close_wininet_object(hInternet, api="WinHttpCloseHandle")
 
         return rv

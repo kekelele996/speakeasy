@@ -60,6 +60,7 @@ from speakeasy.report import (
     DynamicCodeSegment,
     EntryPoint,
     ErrorInfo,
+    HandleAuditReport,
     LoadedModule,
     MemoryAccesses,
     MemoryLayout,
@@ -163,6 +164,7 @@ class Run:
         self.coverage: set[int] = set()
         self.memory_regions: list[dict[str, Any]] = []
         self.loaded_modules: list[dict[str, Any]] = []
+        self.handle_audit: dict[str, Any] | None = None
 
     def get_api_count(self):
         """
@@ -772,6 +774,10 @@ class Profiler:
                     )
                 memory_layout = MemoryLayout(layout=regions, modules=modules)
 
+            handle_audit = None
+            if r.handle_audit:
+                handle_audit = HandleAuditReport.model_validate(r.handle_audit)
+
             ep_tid = r.thread.tid if r.thread else None
             ep_pid = None
             if r.process_context:
@@ -797,6 +803,7 @@ class Profiler:
                 coverage=sorted(r.coverage) if r.coverage else None,
                 dropped_files=dropped_files,
                 memory=memory_layout,
+                handle_audit=handle_audit,
             )
             entry_points.append(ep)
 

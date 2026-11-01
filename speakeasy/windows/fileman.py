@@ -298,17 +298,50 @@ class FileManager:
             for f in full_path_entries:
                 logger.debug("  emu_path=%s  host_path=%s", f.emu_path, getattr(f, "path", None))
 
+    def _audit_created(self, namespace: str, handle: int, obj: Any) -> None:
+        audit = getattr(self.emu, "handle_audit", None)
+        if audit:
+            audit.created(namespace, handle, obj)
+
+    def _audit_touch(self, namespace: str, handle: int) -> None:
+        audit = getattr(self.emu, "handle_audit", None)
+        if audit:
+            audit.touch(namespace, handle)
+
+    def close_handle(self, handle: int) -> str | None:
+        """
+        Record a guest close of a file, pipe or mapping handle.
+
+        The emulated handle tables are intentionally left intact so sloppy
+        samples that keep using a closed handle keep working; only the audit
+        binding is retired.
+        """
+        if handle in self.file_maps:
+            namespace = "filemap"
+        elif handle in self.pipe_handles:
+            namespace = "pipe"
+        elif handle in self.file_handles:
+            namespace = "file"
+        else:
+            return None
+        audit = getattr(self.emu, "handle_audit", None)
+        if audit and audit.closed(namespace, handle, api="CloseHandle"):
+            return namespace
+        return None
+
     def file_create_mapping(self, hfile, name, size, prot):
         if hfile and (hfile & 0xFFFFFFFF) != windefs.INVALID_HANDLE_VALUE:
             f = self.get_file_from_handle(hfile)
             fm = FileMap(self.emu.handle_allocator, name, size, prot, f)
             hnd = fm.get_handle()
             self.file_maps.update({hnd: fm})
+            self._audit_created("filemap", hnd, fm)
             return hnd
         else:
             fm = FileMap(self.emu.handle_allocator, name, size, prot, None)
             hnd = fm.get_handle()
             self.file_maps.update({hnd: fm})
+            self._audit_created("filemap", hnd, fm)
             return hnd
 
     def walk_files(self):
@@ -358,10 +391,12 @@ class FileManager:
             if fm.name and get_object_name_key(fm.name) == key:
                 hnd = fm.get_handle()
                 self.file_maps[hnd] = fm
+                self._audit_created("filemap", hnd, fm)
                 return hnd
         return None
 
     def get_mapping_from_handle(self, handle):
+        self._audit_touch("filemap", handle)
         return self.file_maps.get(handle)
 
     def get_mapping_from_addr(self, addr):
@@ -371,9 +406,11 @@ class FileManager:
                     return fmap
 
     def get_file_from_handle(self, handle):
+        self._audit_touch("file", handle)
         return self.file_handles.get(handle)
 
     def get_pipe_from_handle(self, handle):
+        self._audit_touch("pipe", handle)
         return self.pipe_handles.get(handle)
 
     def get_full_path(self, path):
@@ -471,6 +508,7 @@ class FileManager:
         p = Pipe(self.emu.handle_allocator, path, mode, num_instances, out_size, in_size, config=fconf)
         hnd = p.get_handle()
         self.pipe_handles.update({hnd: p})
+        self._audit_created("pipe", hnd, p)
         return hnd
 
     def get_directories(self):
@@ -523,15 +561,13 @@ class FileManager:
         return fconf is not None and fconf.mode == "full_path"
 
     def get_object_from_handle(self, handle):
-        obj: FileMap | File | None = self.file_maps.get(handle)
+        obj = self.get_mapping_from_handle(handle)
         if obj:
             return obj
-        obj = self.pipe_handles.get(handle)
+        obj = self.get_pipe_from_handle(handle)
         if obj:
             return obj
-        obj = self.file_handles.get(handle)
-        if obj:
-            return obj
+        return self.get_file_from_handle(handle)
 
     def file_open(self, path, create=False, truncate=False, is_dir=False):
         f: File | None
@@ -539,6 +575,7 @@ class FileManager:
             f = NullDevice(self.emu.handle_allocator, path)
             hnd = f.get_handle()
             self.file_handles.update({hnd: f})
+            self._audit_created("file", hnd, f)
             return hnd
 
         hnd = None
@@ -548,6 +585,7 @@ class FileManager:
             f = self.create_file(path)
             hnd = f.get_handle()
             self.file_handles.update({hnd: f})
+            self._audit_created("file", hnd, f)
         else:
             f = self.get_file_from_path(path)
 
@@ -557,6 +595,7 @@ class FileManager:
                 dup = f.duplicate()
                 hnd = dup.get_handle()
                 self.file_handles.update({hnd: dup})
+                self._audit_created("file", hnd, dup)
                 return hnd
 
             fconf = self.get_emu_file(path)
@@ -578,5 +617,6 @@ class FileManager:
                 self.files.append(f)
             hnd = f.get_handle()
             self.file_handles.update({hnd: f})
+            self._audit_created("file", hnd, f)
 
         return hnd
