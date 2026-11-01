@@ -718,11 +718,11 @@ class WindowsEmulator(BinaryEmulator):
         and remove the other startup initializers of the module from the queue.
         """
         for frame in run.guest_callbacks:
-            self.module_loader.rollback_guest_load(frame)
+            self.module_loader.rollback_guest_load(frame, run=run)
         run.guest_callbacks.clear()
         routine = run.guest_initialization
         if routine is None or self.module_loader.finish_initializer(
-            routine, self.get_return_val(), faulted=run.error is not None
+            routine, self.get_return_val(), faulted=run.error is not None, run=run
         ):
             return
         run.error = run.error or ErrorInfo(type="dll_initialization_failed", pc=self.get_pc())
@@ -731,15 +731,15 @@ class WindowsEmulator(BinaryEmulator):
         )
         # Keep the module mapped, because bound import slots can point into it.
         routine.module.load_states[routine.pid] = LoadState.INIT_ERROR
-        self.run_queue[:] = [
-            queued
-            for queued in self.run_queue
-            if not (
-                (pending := queued.guest_initialization) is not None
-                and pending.module is routine.module
-                and pending.pid == routine.pid
-            )
-        ]
+        kept = []
+        for queued in self.run_queue:
+            pending = queued.guest_initialization
+            if pending is not None and pending.module is routine.module and pending.pid == routine.pid:
+                # The remaining callbacks of this module will not run this time.
+                self.module_loader.record_init(pending, "canceled", run=run)
+            else:
+                kept.append(queued)
+        self.run_queue[:] = kept
 
     def call(self, addr, params=[]) -> None:
         """
@@ -767,6 +767,9 @@ class WindowsEmulator(BinaryEmulator):
         logger.info("* exec: %s", run.type)
 
         self.curr_run = run
+        # Attach module lifecycle steps that happened before the first run (input
+        # mapping, static dependencies, initial PEB attachments) to its timeline.
+        self.module_loader.flush_lifecycle_events(run)
         self._seh_last_fault = None
         self._seh_repeat_count = 0
         self._seh_resume_pc = None
@@ -1741,6 +1744,11 @@ class WindowsEmulator(BinaryEmulator):
                 raise ValueError(str(error)) from error
 
         pending = []
+        # Modules pulled in while binding an injected PE import table come from
+        # that PE, the same way static imports attribute to their owning image.
+        owner = self.get_mod_from_addr(base_addr)
+        if owner is not None:
+            self.module_loader.begin_mapping(owner)
         try:
             for slot in mapped_imports.get_import_slots(read, base_addr, ptr_size):
                 bindings = self.module_loader.import_bindings
@@ -1769,6 +1777,9 @@ class WindowsEmulator(BinaryEmulator):
             self.module_loader.import_bindings.update(pending)
         except import_errors:
             logger.warning("invalid injected PE import table at %#x", base_addr, exc_info=True)
+        finally:
+            if owner is not None:
+                self.module_loader.end_mapping()
 
     def get_mod_by_name(self, name):
         name_lower = name.lower()
@@ -1784,12 +1795,25 @@ class WindowsEmulator(BinaryEmulator):
     def get_peb_modules(self):
         return [mod for mod in self.modules if mod.visible_in_peb]
 
-    def load_image(self, image, base: int | None = None, *, is_input: bool = False) -> RuntimeModule:
+    def load_image(
+        self,
+        image,
+        base: int | None = None,
+        *,
+        is_input: bool = False,
+        trigger: str | None = None,
+        requested_by: str | None = None,
+    ) -> RuntimeModule:
         """
         Load an image and its dependencies. Set is_input for the input image. The input
         image is the first module in modules, and only the input image allocates the stack.
+
+        trigger names the action that requested the load (input, static_import, a loader
+        API name, ...); requested_by names the module whose imports pulled it in.
         """
-        return self.module_loader.load_image(image, base, is_input=is_input)
+        return self.module_loader.load_image(
+            image, base, is_input=is_input, trigger=trigger, requested_by=requested_by
+        )
 
     def _load_image(self, image, base=None, *, is_input=False):
         """
@@ -1827,6 +1851,7 @@ class WindowsEmulator(BinaryEmulator):
             self.mem_write(region.base, region.data)
 
         mod = RuntimeModule(image)
+        self.module_loader.record_current_map(mod)
         if is_input:
             self.modules.insert(0, mod)
             for problem in image.problems:
@@ -1838,19 +1863,25 @@ class WindowsEmulator(BinaryEmulator):
             self.stack_base, _stack_addr = self.alloc_stack(self.config.stack_size or image.stack_size)
 
         ptr_size = self.get_ptr_size()
-        for imp in image.imports:
-            try:
-                if not mod.base <= imp.iat_address <= mod.base + mod.image_size - ptr_size:
-                    raise WindowsEmuError("import IAT slot outside image")
-                address = self.get_proc(imp.dll_name, imp.func_name)
-                if not address:
-                    raise WindowsEmuError(f"unresolved import {imp.dll_name}!{imp.func_name}")
-                encoded = address.to_bytes(ptr_size, "little")
-            except (ValueError, OverflowError, uc.UcError, WindowsEmuError) as error:
-                logger.warning("skipping import %s!%s in %s: %s", imp.dll_name, imp.func_name, image.name, error)
-                continue
-            self.mem_write(imp.iat_address, encoded)
-            self.module_loader.import_bindings[imp.iat_address] = address
+        # While the imports of this image resolve, nested loads attribute the
+        # dependencies they map to the import table of this module.
+        self.module_loader.begin_mapping(mod)
+        try:
+            for imp in image.imports:
+                try:
+                    if not mod.base <= imp.iat_address <= mod.base + mod.image_size - ptr_size:
+                        raise WindowsEmuError("import IAT slot outside image")
+                    address = self.get_proc(imp.dll_name, imp.func_name)
+                    if not address:
+                        raise WindowsEmuError(f"unresolved import {imp.dll_name}!{imp.func_name}")
+                    encoded = address.to_bytes(ptr_size, "little")
+                except (ValueError, OverflowError, uc.UcError, WindowsEmuError) as error:
+                    logger.warning("skipping import %s!%s in %s: %s", imp.dll_name, imp.func_name, image.name, error)
+                    continue
+                self.mem_write(imp.iat_address, encoded)
+                self.module_loader.import_bindings[imp.iat_address] = address
+        finally:
+            self.module_loader.end_mapping()
 
         for entry in tuple(self.api_registry.entries.values()):
             if entry.export.kind == "data":
@@ -1984,7 +2015,7 @@ class WindowsEmulator(BinaryEmulator):
         if mod_data:
             p.pe_data = mod_data
         else:
-            new_mod = self.load_module_by_name(file_path, emu_path=file_path)
+            new_mod = self.load_module_by_name(file_path, emu_path=file_path, trigger="process_image")
             p.pe = new_mod
 
         p.path = file_path
@@ -3037,6 +3068,8 @@ class WindowsEmulator(BinaryEmulator):
         routine = frame.initializers.get(frame.function)
         if routine is not None and not self.module_loader.finish_initializer(routine, self.get_return_val()):
             self._fail_library_initializer(frame, routine)
+        elif routine is not None:
+            frame.completed_initializers.add(routine.address)
         self.set_stack_ptr(frame.stack_pointer)
         if frame.pending:
             function, args = frame.pending.pop(0)
@@ -3058,7 +3091,7 @@ class WindowsEmulator(BinaryEmulator):
             self.mem_write(address, data)
         self.set_last_error(1114)  # ERROR_DLL_INIT_FAILED
         self.module_loader.remove_failed_module_from_peb(routine.module, routine.pid)
-        self.module_loader.rollback_guest_load(frame)
+        self.module_loader.rollback_guest_load(frame, run=self.curr_run)
 
     def restore_caller_registers(self, frame):
         """Restore the nonvolatile registers the guest calls of frame may have changed, as Windows keeps them."""
@@ -3417,15 +3450,27 @@ class WindowsEmulator(BinaryEmulator):
             return
         process.add_module_to_peb(module)
 
-    def load_library(self, mod_name):
+    def load_library(self, mod_name, trigger=None):
         original_modules = list(self.modules)
         original_peb_modules = self.module_loader.snapshot_peb_modules()
+        trigger = trigger or None
         name = winemu.normalize_dll_name(module_name(mod_name))
         module = self.get_mod_by_name(name)
+        # A runtime load is an action of the image that the current process runs.
+        requested_by = None
+        current_process = self.get_current_process()
+        if current_process is not None and getattr(current_process, "pe", None) is not None:
+            requested_by = current_process.pe.name or current_process.pe.get_base_name()
         data = self.get_module_data_from_emu_file(mod_name) if module is None else None
         if data and data.startswith(b"MZ"):
             try:
-                module = self.load_module_by_name(name, emu_path=self.fileman.get_full_path(mod_name), data=data)
+                module = self.load_module_by_name(
+                    name,
+                    emu_path=self.fileman.get_full_path(mod_name),
+                    data=data,
+                    trigger=trigger,
+                    requested_by=requested_by,
+                )
             except (WindowsEmuError, ValueError, pefile.PEFormatError) as error:
                 logger.warning("failed to load %s: %s", mod_name, error)
                 return 0
@@ -3435,7 +3480,9 @@ class WindowsEmulator(BinaryEmulator):
             if not known and not self.config.modules.modules_always_exist:
                 return 0
             try:
-                module = self.load_module_by_name(name)
+                module = self.load_module_by_name(
+                    name, trigger=trigger, requested_by=requested_by
+                )
             except WindowsEmuError as error:
                 logger.warning("failed to load %s: %s", name, error)
                 return 0
@@ -3452,7 +3499,9 @@ class WindowsEmulator(BinaryEmulator):
                 frame.initializers[routine.address] = routine
         return module.base
 
-    def load_module_by_name(self, name, emu_path=None, base=None, native_path=None, data=None):
+    def load_module_by_name(
+        self, name, emu_path=None, base=None, native_path=None, data=None, trigger=None, requested_by=None
+    ):
         """Load one coherent native or catalog-generated module instance."""
         name = module_name(name)
         existing = self.get_mod_by_name(name)
@@ -3485,7 +3534,7 @@ class WindowsEmulator(BinaryEmulator):
             ).make_image()
         image.name = name
         image.module_type = _module_type_from_path(emu_path)
-        module = self.load_image(image, base)
+        module = self.load_image(image, base, trigger=trigger, requested_by=requested_by)
         if image.source == "guest_pe" and module.is_dll() and not self.is_kernel_mode:
             self.module_loader.guest_dependencies.append(module)
         return module
@@ -3526,7 +3575,11 @@ class WindowsEmulator(BinaryEmulator):
             for image in getattr(modconf, "images", ()):
                 if image.arch == self.get_arch():
                     native = self.get_native_module_path(image.name)
-            rtmods.append(self.load_module_by_name(name, emu_path=path, base=base, native_path=native))
+            rtmods.append(
+                self.load_module_by_name(
+                    name, emu_path=path, base=base, native_path=native, trigger="configured_module"
+                )
+            )
         return rtmods
 
     def get_thread_context(self, thread=None):

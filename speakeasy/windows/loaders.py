@@ -255,6 +255,11 @@ class RuntimeModule:
     def is_driver(self) -> bool:
         return self._image.module_type == "driver"
 
+    @property
+    def source(self) -> str:
+        """Where the image came from: guest_pe, guest_shellcode or synthetic."""
+        return self._image.source
+
     def get_base_name(self) -> str:
         return ntpath.basename(self.emu_path)
 

@@ -566,6 +566,8 @@ class Process(KernelObject):
         return MappingProxyType(self._peb_modules)
 
     def remove_all_modules_from_peb(self):
+        for module in self._peb_modules.values():
+            self.emu.module_loader.record_peb_change(self, module, added=False, reason="process_exit")
         self.ldr_entries.clear()
         self._peb_modules.clear()
 
@@ -600,6 +602,7 @@ class Process(KernelObject):
         self.ldr_entries.append(ldte)
         self._peb_modules[module.base] = module
         self._sync_peb_module_links()
+        self.emu.module_loader.record_peb_change(self, module, added=True)
 
     def remove_module_from_peb(self, module):
         """Detach a mapped image during loader rollback without freeing memory."""
@@ -610,6 +613,7 @@ class Process(KernelObject):
         self.ldr_entries[:] = [entry for entry in self.ldr_entries if entry.object.DllBase != module.base]
         del self._peb_modules[module.base]
         self._sync_peb_module_links()
+        self.emu.module_loader.record_peb_change(self, module, added=False)
 
     def _sync_peb_module_links(self):
         """Link each loader ring through its own PEB_LDR_DATA sentinel."""

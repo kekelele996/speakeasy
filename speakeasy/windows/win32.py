@@ -183,7 +183,7 @@ class Win32Emulator(WindowsEmulator):
         image.name = self.mod_name
         image.emu_path = emu_path
 
-        rtmod = self.load_image(image, is_input=True)
+        rtmod = self.load_image(image, is_input=True, trigger="input")
         self.set_func_args(self.get_stack_ptr(), self.return_hook, conv=_arch.CALL_CONV_STDCALL)
 
         if self.input is not None:
@@ -369,7 +369,7 @@ class Win32Emulator(WindowsEmulator):
             image.name = os.path.splitext(ntpath.basename(child.path))[0]
             image.emu_path = child.path
             try:
-                child.pe = self.load_image(image)
+                child.pe = self.load_image(image, trigger="process_image")
             except (WindowsEmuError, ValueError) as error:
                 logger.warning("skipping child process %s: %s", child.path, error)
                 continue
@@ -393,7 +393,7 @@ class Win32Emulator(WindowsEmulator):
         finished. Memory that API handlers keep a pointer to stays mapped.
         """
         if process.pe in self.modules:
-            self.module_loader.discard_module(process.pe)
+            self.module_loader.discard_module(process.pe, reason="process_exit")
         addresses = [process.peb.address, process.peb.object.ProcessParameters]
         if process.is_peb_active:
             addresses += [process.peb_ldr_data.address] + [entry.address for entry in process.ldr_entries]
@@ -430,7 +430,7 @@ class Win32Emulator(WindowsEmulator):
         loader = ShellcodeLoader(data=data, arch=arch)
         image = loader.make_image()
         image.name = self.mod_name if filename else str(sc_hash)
-        rtmod = self.load_image(image, is_input=True)
+        rtmod = self.load_image(image, is_input=True, trigger="input")
         sc_addr = rtmod.base
 
         sc_arch = "unknown"
@@ -574,7 +574,7 @@ class Win32Emulator(WindowsEmulator):
         CORE_DLLS = ["ntdll", "kernel32", "kernelbase"]
         for dll in CORE_DLLS:
             if not self.get_mod_by_name(dll):
-                self.load_module_by_name(dll)
+                self.load_module_by_name(dll, trigger="process_bootstrap")
             self.module_loader.shared_peb_modules.add(self.get_mod_by_name(dll).base)
 
     def set_unhandled_exception_handler(self, handler_addr):

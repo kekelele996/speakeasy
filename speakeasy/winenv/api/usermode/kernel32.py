@@ -580,7 +580,7 @@ class Kernel32(ExceptionApis, api.ApiHandler):
         req_lib = self.read_mem_string(lib_name, cw)
         lib = winemu.normalize_dll_name(req_lib)
 
-        hmod = emu.load_library(lib)
+        hmod = emu.load_library(lib, trigger=ctx.func_name)
         ctx.args["lpLibFileName"].display = req_lib
 
         return hmod
@@ -1022,7 +1022,7 @@ class Kernel32(ExceptionApis, api.ApiHandler):
         req_lib = self.read_mem_string(lib_name, cw)
         lib = winemu.normalize_dll_name(req_lib)
 
-        hmod = emu.load_library(lib)
+        hmod = emu.load_library(lib, trigger=ctx.func_name)
 
         flags = {
             0x1: "DONT_RESOLVE_DLL_REFERENCES",

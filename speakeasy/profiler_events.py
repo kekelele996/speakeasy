@@ -305,18 +305,67 @@ class MemFreeEvent(Event):
 
 
 class ModuleLoadEvent(Event):
-    """Records dynamic module loading activity.
+    """Records one step in the life of a mapped guest image.
 
-    Emitted when module load operations map additional images during runtime.
+    Every record identifies the module by ``name``/``path``/``base``/``size``
+    and carries an ``action`` describing the step:
 
-    Useful for dependency discovery and staged import behavior.
+    - ``map``: the image was mapped into the shared address space.
+    - ``peb_add``: the image entered the loader lists of process ``pid``.
+    - ``peb_remove``: the image left the loader lists of process ``pid``.
+    - ``init``: a TLS callback or DllMain ended (or was skipped) in ``pid``.
+    - ``unmap``: the image was unmapped.
+
+    One image is shared across processes, so it is mapped once; per-process
+    state is carried by the ``pid`` of the ``peb_*`` and ``init`` records.
+
+    ``reason`` says why the step happened: for ``map`` it names the trigger
+    (``input``, ``static_import``, a loader API such as
+    ``kernel32.LoadLibraryA``, ``configured_module``, ``process_image``, ...),
+    and for teardown steps it names the cause (``load_failed``,
+    ``init_failed`` or ``process_exit``). ``requested_by`` names the module
+    whose import table pulled the image in.
     """
 
     event: Literal["module_load"] = Field(default="module_load", description="Discriminator for module load events.")
+    action: Literal["map", "peb_add", "peb_remove", "init", "unmap"] = Field(
+        default="map",
+        description="Lifecycle step: map, per-process PEB attach/detach, initializer result, or unmap.",
+    )
     name: str = Field(description="Loaded module name.")
     path: str = Field(description="Loaded module path in emulated filesystem space.")
     base: str = Field(description="Module base address in hexadecimal string form.")
     size: str = Field(description="Mapped module size in hexadecimal string form.")
+    pid: int | None = Field(
+        default=None,
+        description=(
+            "Process that owns this per-process step.\n\n"
+            "The mapping itself is shared; only peb_* and init steps carry a specific pid."
+        ),
+    )
+    reason: str | None = Field(
+        default=None,
+        description=(
+            "What triggered a map, or what caused a teardown step.\n\n"
+            "Map triggers include input, static_import, configured_module, process_image and loader API names; "
+            "teardown causes are load_failed, init_failed and process_exit."
+        ),
+    )
+    requested_by: str | None = Field(
+        default=None,
+        description="Name of the module whose imports caused this image to be mapped, when known.",
+    )
+    callback: Literal["tls_callback", "dll_entry"] | None = Field(
+        default=None,
+        description="For init records, which kind of initializer ran.",
+    )
+    status: Literal["success", "returned_false", "faulted", "canceled"] | None = Field(
+        default=None,
+        description=(
+            "For init records: the callback succeeded, DllMain returned FALSE, the callback faulted, "
+            "or a queued callback was canceled without running."
+        ),
+    )
 
 
 class ThreadCreateEvent(Event):

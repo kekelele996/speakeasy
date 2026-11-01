@@ -108,6 +108,8 @@ class GuestCallbackFrame:
     event: ApiEvent | None = None
     created_modules: list[Any] = field(default_factory=list)
     peb_module_snapshot: list[tuple[Any, dict[int, Any]]] = field(default_factory=list)
+    # Addresses of initializers that already reported success on this frame.
+    completed_initializers: set[int] = field(default_factory=set)
     # Set while a generator handler (speakeasy.windows.guest_callbacks) runs on this frame
     handler: Any = None
     # (register, value) pairs of the nonvolatile registers when the first guest call starts

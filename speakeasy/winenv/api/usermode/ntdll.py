@@ -200,7 +200,7 @@ class Ntdll(ExceptionApis, api.ApiHandler):
         req_lib = self.read_unicode_string(Name)
         lib = winemu.normalize_dll_name(req_lib)
 
-        hmod = emu.load_library(lib)
+        hmod = emu.load_library(lib, trigger=ctx.func_name)
 
         flags = {
             0x1: "DONT_RESOLVE_DLL_REFERENCES",
