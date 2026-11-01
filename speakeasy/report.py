@@ -1,5 +1,5 @@
 from base64 import b64encode
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer
 
@@ -739,6 +739,138 @@ class Report(BaseModel):
             "This is the primary behavioral timeline for the report."
         ),
     )
+    change_report: "ChangeReport | None" = Field(
+        default=None,
+        description=(
+            "Before/after comparison of files and registry values changed by the run.\n\n"
+            "Present once change tracking was armed (automatically before emulated code starts)."
+        ),
+    )
+
+
+class FileChange(BaseModel):
+    """One filesystem path whose contents changed during emulation.
+
+    Entries are grouped by kind in :class:`ChangeReport`, so created files
+    are distinguishable from overwritten pre-existing files and deletions.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    change: Literal["created", "overwritten", "deleted"] = Field(
+        description="Whether the file was created, overwritten or deleted during the run."
+    )
+    path: str = Field(description="Full emulated path of the file.")
+    size_before: int | None = Field(
+        default=None, description="Size in bytes before the run (absent for created files)."
+    )
+    size_after: int | None = Field(default=None, description="Size in bytes after the run (absent for deleted files).")
+    sha256_before: str | None = Field(default=None, description="SHA-256 of the original contents.")
+    sha256_after: str | None = Field(default=None, description="SHA-256 of the final contents.")
+    before_data_ref: str | None = Field(
+        default=None,
+        description="Reference into the top-level report ``data`` store for the original contents, when embedded.",
+    )
+    after_data_ref: str | None = Field(
+        default=None,
+        description="Reference into the top-level report ``data`` store for the final contents, when embedded.",
+    )
+
+
+class RegistryValueChange(BaseModel):
+    """One registry value that was created, overwritten or deleted during emulation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    change: Literal["created", "overwritten", "deleted"]
+    key_path: str = Field(description="Full path of the registry key holding the value.")
+    value_name: str = Field(default="", description="Value name; an empty string names the key's default value.")
+    type_before: int | None = Field(default=None, description="Original registry value type (REG_* code).")
+    type_after: int | None = Field(default=None, description="Final registry value type (REG_* code).")
+    data_before: str | int | None = Field(
+        default=None, description="Original value data. REG_BINARY data is a base64-encoded string."
+    )
+    data_after: str | int | None = Field(
+        default=None, description="Final value data. REG_BINARY data is a base64-encoded string."
+    )
+
+
+class RegistryKeyChange(BaseModel):
+    """A registry key itself that was created or deleted during emulation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    change: Literal["created", "deleted"]
+    path: str = Field(description="Full path of the registry key.")
+
+
+class ChangeReport(BaseModel):
+    """Before/after comparison of emulated filesystem and registry state.
+
+    Every entry is a net change between the pre-run baseline and the final
+    state, so merely reading a pre-existing file or value never appears here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    files_created: list[FileChange] = Field(
+        default_factory=list, description="Files that did not exist before the run."
+    )
+    files_overwritten: list[FileChange] = Field(
+        default_factory=list, description="Pre-existing files whose final contents differ."
+    )
+    files_deleted: list[FileChange] = Field(default_factory=list, description="Files removed during the run.")
+    registry_keys_created: list[RegistryKeyChange] = Field(
+        default_factory=list, description="Registry keys that did not exist before the run."
+    )
+    registry_keys_deleted: list[RegistryKeyChange] = Field(
+        default_factory=list, description="Registry keys removed during the run."
+    )
+    registry_values_created: list[RegistryValueChange] = Field(default_factory=list)
+    registry_values_overwritten: list[RegistryValueChange] = Field(default_factory=list)
+    registry_values_deleted: list[RegistryValueChange] = Field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not (
+            self.files_created
+            or self.files_overwritten
+            or self.files_deleted
+            or self.registry_keys_created
+            or self.registry_keys_deleted
+            or self.registry_values_created
+            or self.registry_values_overwritten
+            or self.registry_values_deleted
+        )
+
+
+class RollbackFailure(BaseModel):
+    """One change item that could not be restored during rollback."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["file", "registry_key", "registry_value"] = Field(description="What kind of item failed to restore.")
+    path: str = Field(description="Emulated file path or registry key path of the failed item.")
+    value_name: str | None = Field(default=None, description="Registry value name, for registry value failures.")
+    error: str = Field(description="Why the item was not restored.")
+
+
+class RollbackResult(BaseModel):
+    """Outcome of rolling back one run's changes: what was restored and what still differs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    files_restored: int = 0
+    registry_keys_restored: int = 0
+    registry_values_restored: int = 0
+    failures: list[RollbackFailure] = Field(
+        default_factory=list,
+        description="Items still different from the baseline after rollback tried each one independently.",
+    )
+
+    @property
+    def success(self) -> bool:
+        """True when every changed item was restored."""
+        return not self.failures
 
 
 class FileManifestEntry(BaseModel):
@@ -772,3 +904,7 @@ class FileManifestEntry(BaseModel):
     sha256: str = Field(
         description=("SHA-256 hash of the archived file bytes.\n\nSupports integrity checks and IOC correlation.")
     )
+
+
+# ChangeReport is defined after Report in this module; resolve its forward reference now.
+Report.model_rebuild()

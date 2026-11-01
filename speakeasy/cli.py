@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 
 CHILD_EXIT_GRACE = 5
 
-ChildResult = tuple[str | None, str | None]
+# (json report, emulation error, optional rollback result dict)
+ChildResult = tuple[str | None, str | None, dict | None]
 
 
 def setup_logging(verbose: bool) -> None:
@@ -38,6 +39,20 @@ def setup_logging(verbose: bool) -> None:
     root.handlers.clear()
     root.addHandler(RichHandler(console=Console(stderr=True), show_path=False, show_time=False, show_level=False))
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
+
+
+def format_rollback_error(rollback: dict) -> str | None:
+    """Render the unrecovered rollback items as one error string, or None."""
+    failures = rollback.get("failures") if rollback else None
+    if not failures:
+        return None
+    details = "; ".join(
+        f"{item.get('kind')} {item.get('path')}"
+        + (f"@{item.get('value_name')}" if item.get("value_name") is not None else "")
+        + f": {item.get('error')}"
+        for item in failures
+    )
+    return f"rollback could not restore {len(failures)} item(s): {details}"
 
 
 def emulate_binary(
@@ -55,11 +70,14 @@ def emulate_binary(
     verbose=False,
     gdb_port=None,
     gdb_host="127.0.0.1",
+    change_report_path="",
+    rollback_changes=False,
 ):
     setup_logging(verbose)
 
     report = None
     error = None
+    rollback_result = None
     se = None
     try:
         se = Speakeasy(
@@ -98,7 +116,41 @@ def emulate_binary(
             except Exception as err:
                 logger.debug("report generation failed", exc_info=True)
                 error = error or f"failed to build the report: {err or type(err).__name__}"
-        q.put((report, error))
+
+            if change_report_path and report is not None:
+                try:
+                    change_report = se.get_change_report().model_dump_json(indent=4, exclude_none=True)
+                    logger.info("* Saving file/registry change report to %s", change_report_path)
+                    with open(change_report_path, "w") as f:
+                        f.write(change_report)
+                except Exception as err:
+                    logger.debug("change report generation failed", exc_info=True)
+                    error = error or f"failed to build the change report: {err or type(err).__name__}"
+
+            # Roll back the emulated file/registry state only after the report
+            # (the observation records) has been built.
+            if rollback_changes and report is not None:
+                try:
+                    outcome = se.rollback_changes()
+                    rollback_result = outcome.model_dump()
+                    logger.info(
+                        "* Rolled back %d file(s), %d registry key(s) and %d registry value(s)",
+                        outcome.files_restored,
+                        outcome.registry_keys_restored,
+                        outcome.registry_values_restored,
+                    )
+                    for failure in outcome.failures:
+                        target = failure.path
+                        if failure.value_name is not None:
+                            target = f"{target}@{failure.value_name}"
+                        logger.error("* Rollback could not restore %s %s: %s", failure.kind, target, failure.error)
+                except Exception as err:
+                    logger.debug("rollback failed", exc_info=True)
+                    rollback_result = {
+                        "failures": [{"kind": "rollback", "path": "", "value_name": None, "error": str(err)}]
+                    }
+
+        q.put((report, error, rollback_result))
 
         if dropped_files_path and se is not None and se.has_emulator:
             data = se.create_file_archive()
@@ -125,7 +177,9 @@ def get_child_result(q: mp.Queue[ChildResult], p: mp.Process, wait: float) -> Ch
                 return None
 
 
-def wait_for_child(q: mp.Queue[ChildResult], p: mp.Process, evt, wall_limit) -> ChildResult:
+def wait_for_child(
+    q: mp.Queue[ChildResult], p: mp.Process, evt, wall_limit
+) -> tuple[str | None, str | None] | ChildResult:
     """
     Wait for the result of the emulation process and stop it after ``wall_limit`` seconds.
     A child that exits or stops without a result gives an error.
@@ -163,6 +217,8 @@ def run_main(parser: argparse.ArgumentParser, args: argparse.Namespace, config_s
     target = args.target
     output = args.output
     dropped_files_path = args.dropped_files_path
+    change_report_path = args.change_report_path
+    do_rollback = args.rollback_changes
     config_path = args.config
     emulate_children = args.emulate_children
     do_raw = args.do_raw
@@ -226,8 +282,10 @@ def run_main(parser: argparse.ArgumentParser, args: argparse.Namespace, config_s
             verbose=verbose,
             gdb_port=gdb_port,
             gdb_host=gdb_host,
+            change_report_path=change_report_path,
+            rollback_changes=do_rollback,
         )
-        result = q.get()
+        result: tuple[str | None, str | None] | ChildResult = q.get()
     else:
         p = mp.Process(
             target=emulate_binary,
@@ -248,18 +306,30 @@ def run_main(parser: argparse.ArgumentParser, args: argparse.Namespace, config_s
                 "verbose": verbose,
                 "gdb_port": gdb_port,
                 "gdb_host": gdb_host,
+                "change_report_path": change_report_path,
+                "rollback_changes": do_rollback,
             },
         )
         p.start()
         result = wait_for_child(q, p, evt, wall_limit)
 
     logger.info("* Finished emulating")
-    report, error = result
+    if result is None:
+        report, error, rollback = None, "emulation process produced no result", None
+    elif len(result) == 2:
+        report, error = result
+        rollback = None
+    else:
+        report, error, rollback = result
 
     if report and output:
         logger.info("* Saving emulation report to %s", output)
         with open(output, "w") as f:
             f.write(report)
+
+    rollback_error = format_rollback_error(rollback) if rollback else None
+    if rollback_error:
+        error = f"{error}; {rollback_error}" if error else rollback_error
 
     return error
 
@@ -329,6 +399,23 @@ def main():
         dest="dropped_files_path",
         required=False,
         help="Path to store files created during emulation",
+    )
+    parser.add_argument(
+        "--change-report",
+        action="store",
+        dest="change_report_path",
+        required=False,
+        help="Path to save the before/after report of files and registry values "
+        "changed during emulation (created/overwritten/deleted with final contents)",
+    )
+    parser.add_argument(
+        "--rollback-changes",
+        action="store_true",
+        dest="rollback_changes",
+        required=False,
+        help="After the run, roll back only the file and registry changes made during "
+        "this emulation; observation records in the report are kept. Failures name the "
+        "items that were not restored.",
     )
     parser.add_argument(
         "-k",

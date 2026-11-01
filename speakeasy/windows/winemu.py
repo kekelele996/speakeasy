@@ -39,12 +39,13 @@ import speakeasy.winenv.arch as _arch
 import speakeasy.winenv.defs.nt.ddk as ddk
 import speakeasy.winenv.defs.windows.windows as windef
 from speakeasy.binemu import BinaryEmulator
+from speakeasy.changes import ChangeTracker
 from speakeasy.config import parse_start_time
 from speakeasy.errors import FileSystemEmuError, OutOfMemoryError, WindowsEmuError
 from speakeasy.gdb import GdbServer, ResumeAction, StopReason
 from speakeasy.profiler import GuestCallbackFrame, MemAccess, Run
 from speakeasy.profiler_events import ApiArg, TracePosition
-from speakeasy.report import ErrorInfo, RegionInfo
+from speakeasy.report import ChangeReport, ErrorInfo, RegionInfo, Report, RollbackResult
 from speakeasy.struct import EmuStruct
 from speakeasy.windows.api_image import ApiModuleLoader
 from speakeasy.windows.api_registry import ApiEntry, ApiRegistry, module_name, symbol_ref
@@ -387,6 +388,8 @@ class WindowsEmulator(BinaryEmulator):
             self.handle_allocator, self.config.registry, os_ver=self.config.os_ver
         )
         self.fileman: FileManager = FileManager(config, self)
+        # Before/after change tracking for emulated files and registry state
+        self.change_tracker: ChangeTracker = ChangeTracker()
         self.netman: NetworkManager = NetworkManager(self.handle_allocator, config=self.config.network)
         self.driveman: DriveManager = DriveManager(config=self.config.drives)
         self.cryptman: CryptoManager = CryptoManager(self.handle_allocator)
@@ -600,6 +603,52 @@ class WindowsEmulator(BinaryEmulator):
         Get the drive manager
         """
         return self.driveman
+
+    def arm_change_tracking(self, *, force: bool = False) -> None:
+        """
+        Snapshot the current file and registry state as the baseline for the
+        before/after change report. This runs automatically before emulated
+        code starts; call this to take the snapshot earlier or to reset it.
+        """
+        self.change_tracker.arm(self.fileman, self.regman, force=force)
+
+    def get_change_report(self) -> ChangeReport:
+        """
+        Get the before/after comparison of files and registry values changed
+        during emulation. If no baseline was captured, the current state is
+        snapshotted, so the first report is empty.
+        """
+        if not self.change_tracker.armed:
+            self.arm_change_tracking()
+        return self.change_tracker.build_change_report(self.fileman, self.regman, self.profiler.artifact_store)
+
+    def rollback_changes(self) -> RollbackResult:
+        """
+        Undo only the file and registry changes made after the baseline.
+
+        Observation records (events, dropped files, reports) are preserved.
+        Each item is restored independently; the result lists any item that
+        could not be restored.
+        """
+        if not self.change_tracker.armed:
+            self.arm_change_tracking()
+        return self.change_tracker.rollback(self.fileman, self.regman)
+
+    def get_report(self) -> Report:
+        """
+        Get the emulation report, including the before/after change report
+        when change tracking has a baseline.
+        """
+        report = super().get_report()
+        if self.change_tracker.armed:
+            report.change_report = self.get_change_report()
+        return report
+
+    def get_json_report(self) -> str:
+        """
+        Get the emulation report as JSON, including the change report.
+        """
+        return self.get_report().model_dump_json(indent=4, exclude_none=True)
 
     def dev_ioctl(self, arch, dev, ioctl, inbuf):
         rv = ddk.STATUS_INVALID_DEVICE_REQUEST
@@ -1247,6 +1296,8 @@ class WindowsEmulator(BinaryEmulator):
         if total_budget.exhausted:
             self._cancel_execution_runs()
             return
+        # Snapshot files and registry before any emulated code runs
+        self.change_tracker.arm(self.fileman, self.regman)
         self._queue_startup_initializers()
         try:
             run = self.run_queue.pop(0)

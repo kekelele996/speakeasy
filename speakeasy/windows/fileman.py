@@ -160,7 +160,7 @@ class File:
         self.pos = buf.tell()
         return data
 
-    def get_contents(self):
+    def get_contents(self) -> bytes:
         """
         Return all the file data and keep the file pointer.
         """

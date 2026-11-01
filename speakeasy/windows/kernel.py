@@ -12,6 +12,7 @@ import speakeasy.winenv.defs.nt.ntoskrnl as ntos
 import speakeasy.winenv.defs.registry.reg as regdefs
 from speakeasy.errors import KernelEmuError
 from speakeasy.profiler import Run
+from speakeasy.report import Report
 from speakeasy.windows.ioman import IoManager
 from speakeasy.windows.loaders import PeLoader
 from speakeasy.windows.winemu import WindowsEmulator
@@ -553,12 +554,12 @@ class WinKernelEmulator(WindowsEmulator, IoManager):
             if not r.type or run_types.get(r.type):
                 r.type = run_types.get(r.type, "unk")
 
-    def get_report(self):
+    def get_report(self) -> Report:
         """Retrieve the execution profile for the emulator"""
         self._set_entry_point_names()
         return super().get_report()
 
-    def get_json_report(self):
+    def get_json_report(self) -> str:
         self._set_entry_point_names()
         return super().get_json_report()
 

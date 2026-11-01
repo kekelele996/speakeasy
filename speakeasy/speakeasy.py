@@ -745,6 +745,43 @@ class Speakeasy:
         """
         return self.emu.get_dropped_files()
 
+    @check_init
+    def arm_change_tracking(self, *, force: bool = False) -> None:
+        """
+        Snapshot current emulated file and registry state as the before/after
+        baseline. A baseline is captured automatically before emulation starts;
+        use this only to take it earlier or to reset it.
+
+        return:
+            None
+        """
+        self.emu.arm_change_tracking(force=force)
+
+    @check_init
+    def get_change_report(self):
+        """
+        Get the before/after comparison of the file and registry changes the
+        emulated code made, with final contents and created/overwritten/deleted
+        kinds called out per item.
+
+        return:
+            A ChangeReport model
+        """
+        return self.emu.get_change_report()
+
+    @check_init
+    def rollback_changes(self):
+        """
+        Undo only the file and registry changes made during this emulation,
+        restoring the captured baseline. Observation records (events, dropped
+        files and reports) are preserved. The returned result names any item
+        that could not be restored.
+
+        return:
+            A RollbackResult model
+        """
+        return self.emu.rollback_changes()
+
     def create_file_archive(self) -> bytes:
         """
         Creates a file archive package.
