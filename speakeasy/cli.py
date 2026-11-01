@@ -24,6 +24,7 @@ from speakeasy.cli_config import (
     merge_config_dicts,
 )
 from speakeasy.config import SpeakeasyConfig
+from speakeasy.report_diff import IncomparableReports, compare_reports, load_report_file, render_comparison
 from speakeasy.volumes import apply_volumes
 
 logger = logging.getLogger(__name__)
@@ -159,6 +160,33 @@ def wait_for_child(q: mp.Queue[ChildResult], p: mp.Process, evt, wall_limit) -> 
     return result
 
 
+def run_diff_report(parser: argparse.ArgumentParser, old_path: str, new_path: str) -> bool:
+    """Compare two saved run reports and print the result to stdout.
+
+    Returns ``True`` when the reports were compared, ``False`` when they could
+    not be compared (different sample or incomplete records).
+    """
+
+    for path in (old_path, new_path):
+        if not os.path.isfile(path):
+            parser.error(f"Report file not found: {path}")
+
+    try:
+        old_report = load_report_file(old_path)
+        new_report = load_report_file(new_path)
+    except IncomparableReports as err:
+        logger.error("Cannot compare reports: %s", err)
+        return False
+
+    comparison = compare_reports(old_report, new_report, old_path=old_path, new_path=new_path)
+    if not comparison.comparable:
+        logger.error("Cannot compare reports: %s", comparison.reason)
+        return False
+
+    print(render_comparison(comparison))
+    return True
+
+
 def run_main(parser: argparse.ArgumentParser, args: argparse.Namespace, config_specs) -> str | None:
     target = args.target
     output = args.output
@@ -292,6 +320,16 @@ def main():
         help="Print built-in default config JSON and exit",
     )
     parser.add_argument(
+        "--diff-report",
+        nargs=2,
+        metavar=("OLD_REPORT", "NEW_REPORT"),
+        dest="diff_report",
+        required=False,
+        help="Compare two saved run reports from the same sample: align runs by entry point, events by "
+        "module and action, and dropped files by path; print added, removed, and changed items "
+        "(with before/after values and event positions) and exit. No emulation is performed.",
+    )
+    parser.add_argument(
         "--raw",
         action="store_true",
         dest="do_raw",
@@ -392,6 +430,10 @@ def main():
     args = parser.parse_args()
     if args.dump_default_config:
         print(json.dumps(get_default_config_dict(), indent=4))
+        return
+    if args.diff_report:
+        if not run_diff_report(parser, *args.diff_report):
+            sys.exit(1)
         return
     error = run_main(parser, args, config_specs)
     if error:

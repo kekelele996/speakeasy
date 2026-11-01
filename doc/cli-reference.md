@@ -10,12 +10,18 @@ speakeasy --target <path-to-sample> [flags]
 
 Rules:
 - `--target` is required for emulation runs.
-- `--dump-default-config` is the only mode that does not require `--target`.
+- `--dump-default-config` and `--diff-report` are the only modes that do not require `--target`.
 
 Default config dump:
 
 ```bash
 speakeasy --dump-default-config > default-config.json
+```
+
+Compare two saved runs of the same sample without emulating:
+
+```bash
+speakeasy --diff-report run1.json run2.json
 ```
 
 ## Runtime-only flags
@@ -27,6 +33,7 @@ These flags are not generated from the config schema.
 - `--argv`: argv values for the emulated process (quoted string, parsed with shell rules). For an EXE they replace `command_line`, and the process command line is the quoted program path followed by these values
 - `-c, --config`: JSON config overlay file
 - `--dump-default-config`: print built-in default config and exit
+- `--diff-report OLD_REPORT NEW_REPORT`: compare two saved run reports and exit. Runs are aligned by entry point, events by module and action, dropped files by path; output separates added, removed, and changed items (changed items show before/after values and both event positions). Refuses to compare records from different samples (`sha256` mismatch) or incomplete/unalignable records, and exits non-zero
 - `--raw`: treat input as raw bytes/shellcode
 - `--raw-offset`: raw execution start offset (hex)
 - `--arch`: architecture override (`x86`, `amd64`; `x64` accepted in raw mode)
@@ -151,6 +158,12 @@ Memory snapshots and dropped-files archive:
 
 ```bash
 speakeasy --target sample.exe --snapshot-memory-regions --dropped-files-path dropped.zip
+```
+
+Compare two runs of the same sample taken with different module/configuration overlays:
+
+```bash
+speakeasy --diff-report run-default.json run-overlay.json
 ```
 
 ## Related docs
