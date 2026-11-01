@@ -65,6 +65,9 @@ from speakeasy.report import (
     MemoryLayout,
     MemoryRegion,
     ModuleSegment,
+    ProcessFileSummary,
+    ProcessNetworkSummary,
+    ProcessNode,
     Report,
     StringCollection,
     StringsReport,
@@ -171,6 +174,317 @@ class Run:
         return self.num_apis
 
 
+@dataclass
+class _TreeFileAgg:
+    """File counters accumulated for one target path under one process."""
+
+    path: str
+    creates: int = 0
+    opens: int = 0
+    reads: int = 0
+    writes: int = 0
+    bytes_read: int = 0
+    bytes_written: int = 0
+
+    def to_summary(self) -> ProcessFileSummary:
+        return ProcessFileSummary(
+            path=self.path,
+            creates=self.creates,
+            opens=self.opens,
+            reads=self.reads,
+            writes=self.writes,
+            bytes_read=self.bytes_read if self.reads else None,
+            bytes_written=self.bytes_written if self.writes else None,
+        )
+
+
+@dataclass
+class _TreeNetAgg:
+    """Network counters accumulated for one endpoint under one process."""
+
+    kind: str
+    endpoint: str
+    port: int | None = None
+    proto: str | None = None
+    count: int = 0
+    actions: list[str] = field(default_factory=list)
+    response: str | None = None
+
+    def add_action(self, action: str | None) -> None:
+        if action and action not in self.actions:
+            self.actions.append(action)
+
+    def to_summary(self) -> ProcessNetworkSummary:
+        return ProcessNetworkSummary(
+            kind=self.kind,
+            endpoint=self.endpoint,
+            port=self.port,
+            proto=self.proto,
+            actions=list(self.actions),
+            response=self.response,
+            count=self.count,
+        )
+
+
+@dataclass
+class _TreeNode:
+    """Internal accumulator for one process while the hierarchy is assembled."""
+
+    pid: int
+    order: int
+    path: str | None = None
+    cmdline: str | None = None
+    creator_pid: int | None = None
+    root: bool = False
+    # Whether any actual record (an entry run or creation event target) names
+    # this process. Actor-only references from events are provisional until
+    # proven to correspond to a real record.
+    known: bool = False
+    executed: bool = False
+    missing_parent: bool = False
+    missing_record: bool = False
+    primary: EntryPoint | None = None
+    files: dict[str, _TreeFileAgg] = field(default_factory=dict)
+    network: dict[tuple[Any, ...], _TreeNetAgg] = field(default_factory=dict)
+
+
+def build_process_tree(
+    entries: list[EntryPoint],
+    process_meta: dict[int, dict[str, str | None]] | None = None,
+    process_skips: dict[int, str] | None = None,
+) -> list[ProcessNode] | None:
+    """Assemble the parent/child process hierarchy for one emulation session.
+
+    Parent/child edges come from ``process_create`` events: the event payload
+    identifies the new process while the event position identifies its creator.
+    File and network events are attributed to their actor process by position
+    pid. Nodes are keyed by pid, so repeated spawns of the same image path stay
+    distinct. A creation record whose creator has no record of its own yields a
+    placeholder node (``missing_record``) and flags the child's parent as
+    missing instead of silently reparenting the process.
+
+    Args:
+        entries: Entry points produced for the session, in run order.
+        process_meta: Optional per-pid path/cmdline taken from live process
+            objects, used to name the initial process and executed children.
+        process_skips: Optional per-pid reason recorded when a created child
+            could not be emulated.
+
+    Returns:
+        Root nodes of the process hierarchy, or ``None`` when the report
+        contains no identifiable process.
+    """
+
+    process_meta = process_meta or {}
+    process_skips = process_skips or {}
+
+    nodes: dict[int, _TreeNode] = {}
+    order_counter = 0
+
+    def get_node(pid: int) -> _TreeNode:
+        nonlocal order_counter
+        node = nodes.get(pid)
+        if node is None:
+            node = _TreeNode(pid=pid, order=order_counter)
+            order_counter += 1
+            nodes[pid] = node
+        return node
+
+    def file_agg(pid: int, path: str) -> _TreeFileAgg:
+        node = get_node(pid)
+        agg = node.files.get(path)
+        if agg is None:
+            agg = _TreeFileAgg(path=path)
+            node.files[path] = agg
+        return agg
+
+    def account_file_event(pid: int, event: AnyEvent) -> None:
+        if isinstance(event, FileCreateEvent):
+            file_agg(pid, event.path).creates += 1
+        elif isinstance(event, FileOpenEvent):
+            file_agg(pid, event.path).opens += 1
+        elif isinstance(event, FileReadEvent):
+            agg = file_agg(pid, event.path)
+            agg.reads += 1
+            if event.size:
+                agg.bytes_read += event.size
+        elif isinstance(event, FileWriteEvent):
+            agg = file_agg(pid, event.path)
+            agg.writes += 1
+            if event.size:
+                agg.bytes_written += event.size
+
+    def account_net_event(pid: int, event: AnyEvent) -> None:
+        node = get_node(pid)
+        if isinstance(event, NetDnsEvent):
+            key = ("dns", event.query, None, None)
+            agg = node.network.get(key)
+            if agg is None:
+                agg = _TreeNetAgg(kind="dns", endpoint=event.query)
+                agg.add_action("resolve")
+                node.network[key] = agg
+            agg.count += 1
+            if event.response:
+                agg.response = event.response
+        elif isinstance(event, NetHttpEvent):
+            key = ("http", event.server, event.port, event.proto)
+            agg = node.network.get(key)
+            if agg is None:
+                agg = _TreeNetAgg(kind="http", endpoint=event.server, port=event.port, proto=event.proto)
+                agg.add_action("request")
+                node.network[key] = agg
+            agg.count += 1
+        elif isinstance(event, NetTrafficEvent):
+            key = ("traffic", event.server, event.port, event.proto)
+            agg = node.network.get(key)
+            if agg is None:
+                agg = _TreeNetAgg(kind="traffic", endpoint=event.server, port=event.port, proto=event.proto)
+                node.network[key] = agg
+            agg.count += 1
+            agg.add_action(event.type)
+
+    root_pid: int | None = None
+    for ep in entries:
+        if ep.pid is None:
+            continue
+        if root_pid is None:
+            root_pid = ep.pid
+        node = get_node(ep.pid)
+        node.known = True
+        node.executed = True
+        meta = process_meta.get(ep.pid)
+        if meta:
+            if not node.path and meta.get("path"):
+                node.path = meta["path"]
+            if not node.cmdline and meta.get("cmdline"):
+                node.cmdline = meta["cmdline"]
+        if node.primary is None or (node.primary.ep_type != "module_entry" and ep.ep_type == "module_entry"):
+            node.primary = ep
+
+        for event in ep.events or []:
+            actor_pid = event.pos.pid
+            if isinstance(event, ProcessCreateEvent):
+                target_pid = event.pid
+                if target_pid is None:
+                    # The creation record does not identify a distinct process.
+                    continue
+                target = get_node(target_pid)
+                target.known = True
+                if not target.path:
+                    target.path = event.path
+                if not target.cmdline and event.cmdline:
+                    target.cmdline = event.cmdline
+                if target.creator_pid is None:
+                    target.creator_pid = actor_pid
+                get_node(actor_pid)
+            elif isinstance(event, (FileCreateEvent, FileOpenEvent, FileReadEvent, FileWriteEvent)):
+                account_file_event(actor_pid, event)
+            elif isinstance(event, (NetDnsEvent, NetHttpEvent, NetTrafficEvent)):
+                account_net_event(actor_pid, event)
+
+    if not nodes:
+        return None
+
+    root_node = nodes.get(root_pid) if root_pid is not None else None
+
+    def to_process_node(node: _TreeNode) -> ProcessNode:
+        end_reason = "not_emulated"
+        end_detail: str | None = None
+        error_type: str | None = None
+        exit_code: int | None = None
+
+        if node.missing_record:
+            end_reason = "missing_record"
+        elif (skip_reason := process_skips.get(node.pid)) is not None:
+            end_reason = "skipped"
+            end_detail = skip_reason
+        elif node.primary is not None:
+            error = node.primary.error
+            if error is not None:
+                end_reason = "error"
+                error_type = error.type
+                end_detail = error.context_summary
+            else:
+                end_reason = "completed"
+                exit_code = node.primary.ret_val
+
+        return ProcessNode(
+            pid=node.pid,
+            path=node.path,
+            cmdline=node.cmdline,
+            creator_pid=None if node.root else node.creator_pid,
+            root=node.root,
+            missing_parent=node.missing_parent,
+            missing_record=node.missing_record,
+            end_reason=end_reason,
+            end_detail=end_detail,
+            error_type=error_type,
+            exit_code=exit_code,
+            files=[agg.to_summary() for agg in node.files.values()],
+            network=[agg.to_summary() for agg in node.network.values()],
+            children=[],
+        )
+
+    def _node_sort(node: _TreeNode) -> tuple[int, int]:
+        return node.order, node.pid
+
+    # Resolve the emulation root and references to creators without records.
+    children_by_pid: dict[int, list[_TreeNode]] = {}
+    missing_creators: set[int] = set()
+    if root_node is not None:
+        root_node.root = True
+        root_node.creator_pid = None
+
+    for node in list(nodes.values()):
+        if node.root or not node.known:
+            continue
+        creator_pid = node.creator_pid
+        creator = nodes.get(creator_pid) if creator_pid is not None else None
+        if creator_pid is None or creator is None or not creator.known:
+            # No creation record names this process's creator, or it names a pid
+            # that only appears as an event actor without its own process record.
+            node.missing_parent = True
+            if creator_pid is not None:
+                missing_creators.add(creator_pid)
+
+    # Add placeholder nodes only after iterating, so the node table cannot change size mid-iteration.
+    for creator_pid in missing_creators:
+        placeholder = get_node(creator_pid)
+        placeholder.missing_record = True
+        placeholder.path = None
+
+    for node in nodes.values():
+        if node.root or node.creator_pid is None:
+            continue
+        # Missing-parent children stay nested under their placeholder creator so
+        # the broken link remains visible in the hierarchy.
+        children_by_pid.setdefault(node.creator_pid, []).append(node)
+
+    def build_subtree(node: _TreeNode) -> ProcessNode:
+        rendered = to_process_node(node)
+        child_nodes = sorted(children_by_pid.get(node.pid, []), key=_node_sort)
+        rendered.children = [build_subtree(child) for child in child_nodes]
+        return rendered
+
+    top_level: list[_TreeNode] = []
+    if root_node is not None:
+        top_level.append(root_node)
+    # Parentless real processes and placeholder creators, in first-seen order.
+    for node in sorted(nodes.values(), key=_node_sort):
+        if node.root or node.creator_pid is not None:
+            continue
+        top_level.append(node)
+
+    rendered_roots: list[ProcessNode] = []
+    seen: set[int] = set()
+    for node in top_level:
+        if node.pid in seen:
+            continue
+        seen.add(node.pid)
+        rendered_roots.append(build_subtree(node))
+    return rendered_roots
+
+
 class Profiler:
     """
     The profiler class exists to generate an execution report
@@ -190,6 +504,8 @@ class Profiler:
         self.meta: dict[str, Any] = {}
         self.runs: list[Run] = []
         self.artifact_store: ArtifactStore = ArtifactStore()
+        # Per-pid reason recorded when a created child process could not be emulated.
+        self.process_skips: dict[int, str] = {}
 
     def add_input_metadata(self, meta):
         """
@@ -245,6 +561,15 @@ class Profiler:
         if not self.meta.get("errors"):
             self.meta["errors"] = []
         self.meta["errors"].append(error)
+
+    def record_process_skip(self, proc, reason: str) -> None:
+        """Record why a created child process was not emulated.
+
+        The reason surfaces on the process-tree node so created-but-skipped
+        children are distinguishable from children that simply were never
+        scheduled (for example when child emulation is disabled).
+        """
+        self.process_skips[proc.id] = reason
 
     def record_dropped_files_event(self, run, files):
         for f in files:
@@ -683,6 +1008,7 @@ class Profiler:
         Retrieve the execution profile for the emulator
         """
         entry_points = []
+        process_meta: dict[int, dict[str, str | None]] = {}
 
         for r in self.runs:
             args: list[Any] = []
@@ -774,10 +1100,16 @@ class Profiler:
 
             ep_tid = r.thread.tid if r.thread else None
             ep_pid = None
-            if r.process_context:
-                ep_pid = r.process_context.id
-            elif r.thread and r.thread.process:
-                ep_pid = r.thread.process.id
+            run_process = r.process_context
+            if run_process is None and r.thread:
+                run_process = r.thread.process
+            if run_process:
+                ep_pid = run_process.id
+                if ep_pid not in process_meta:
+                    process_meta[ep_pid] = {
+                        "path": getattr(run_process, "path", None),
+                        "cmdline": getattr(run_process, "cmdline", None),
+                    }
 
             if r.start_addr is None:
                 raise SpeakeasyError("run has no start address")
@@ -821,6 +1153,7 @@ class Profiler:
         errors: list[ErrorInfo] | None = self.meta.get("errors") or None
 
         report_data = self.artifact_store.to_report_data()
+        process_tree = build_process_tree(entry_points, process_meta, self.process_skips)
         report = Report(
             report_version=__report_version__,
             emulation_total_runtime=round(self.runtime, 3),
@@ -835,5 +1168,6 @@ class Profiler:
             strings=strings_report,
             data=report_data or None,
             entry_points=entry_points,
+            process_tree=process_tree,
         )
         return report

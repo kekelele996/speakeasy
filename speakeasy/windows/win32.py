@@ -352,7 +352,10 @@ class Win32Emulator(WindowsEmulator):
         while len(self.child_processes) > 0:
             child = self.child_processes.pop(0)
             if not child.pe_data:
-                logger.warning("skipping child process %s: no image in the emulated file system", child.path)
+                reason = "no image available in the emulated file system"
+                logger.warning("skipping child process %s: %s", child.path, reason)
+                if self.profiler:
+                    self.profiler.record_process_skip(child, reason)
                 continue
 
             # All processes share one address space. The process that ran
@@ -371,7 +374,10 @@ class Win32Emulator(WindowsEmulator):
             try:
                 child.pe = self.load_image(image)
             except (WindowsEmuError, ValueError) as error:
+                reason = str(error)
                 logger.warning("skipping child process %s: %s", child.path, error)
+                if self.profiler:
+                    self.profiler.record_process_skip(child, reason)
                 continue
 
             child.base = child.pe.base

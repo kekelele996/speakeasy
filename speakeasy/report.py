@@ -637,6 +637,163 @@ class EntryPoint(BaseModel):
     )
 
 
+class ProcessFileSummary(BaseModel):
+    """Summarizes the file actions attributed to one emulated process.
+
+    Entries are aggregated from file events by the process identifier of the
+    actor that performed the operation, so activity of a parent and its child
+    processes stays separated even when they touch identical paths.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(
+        description=(
+            "Emulated file path targeted by the operations.\n\n"
+            "All create/open/read/write events against this path by the owning process are merged here."
+        )
+    )
+    creates: int = Field(default=0, description="Number of file-creation events observed for this path.")
+    opens: int = Field(default=0, description="Number of open-without-create events observed for this path.")
+    reads: int = Field(default=0, description="Number of file-read events observed for this path.")
+    writes: int = Field(default=0, description="Number of file-write events observed for this path.")
+    bytes_read: int | None = Field(
+        default=None,
+        description="Total bytes read from this path by the process, when any read sizes were reported.",
+    )
+    bytes_written: int | None = Field(
+        default=None,
+        description="Total bytes written to this path by the process, when any write sizes were reported.",
+    )
+
+
+class ProcessNetworkSummary(BaseModel):
+    """Summarizes network activity attributed to one emulated process.
+
+    Each entry identifies one DNS query, socket endpoint, or HTTP endpoint,
+    keyed independently of other processes so repeated lookups or connections
+    from different process generations remain distinguishable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str = Field(
+        description="Activity category: ``dns`` for name resolution, ``traffic`` for socket traffic, or ``http``."
+    )
+    endpoint: str = Field(
+        description=(
+            "Target endpoint for the activity.\n\n"
+            "The queried domain for DNS, otherwise the remote server host or IP address."
+        )
+    )
+    port: int | None = Field(default=None, description="Remote port, for traffic and HTTP activity.")
+    proto: str | None = Field(default=None, description="Protocol label reported with the activity, when known.")
+    actions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Distinct observed action labels for the endpoint.\n\n"
+            "For socket traffic these are subtypes such as connect, bind, data_in, or data_out."
+        ),
+    )
+    response: str | None = Field(default=None, description="Resolved response for DNS queries, when available.")
+    count: int = Field(description="Number of events aggregated into this summary.")
+
+
+class ProcessNode(BaseModel):
+    """One process in the hierarchical parent/child summary of an emulation run.
+
+    Nodes are keyed by process identifier, so two generations spawned from the
+    same image path appear as distinct nodes. The tree is stitched together
+    from process-creation events: the creator is taken from the actor position
+    of each creation event. Nodes for created-but-never-emulated processes are
+    included with an appropriate ``end_reason``, and references to processes
+    without their own record are surfaced with the missing-record flags instead
+    of being silently dropped.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pid: int = Field(
+        description=(
+            "Emulated process identifier.\n\n"
+            "This is the stable key for the node: identical image paths in different generations differ here."
+        )
+    )
+    path: str | None = Field(
+        default=None,
+        description=(
+            "Emulated image path of the process.\n\n"
+            "Absent only for placeholder nodes that stand in for a missing parent record."
+        ),
+    )
+    cmdline: str | None = Field(
+        default=None,
+        description="Command line the process was created with, when recorded."
+    )
+    creator_pid: int | None = Field(
+        default=None,
+        description=(
+            "Identifier of the process that created this one.\n\n"
+            "The emulation root has no creator. Cross-check with ``missing_parent`` when it points at an "
+            "unseen process."
+        )
+    )
+    root: bool = Field(
+        default=False,
+        description="Whether this node is the initial process of the emulation session.",
+    )
+    missing_parent: bool = Field(
+        default=False,
+        description=(
+            "Set when the creation record names a creator that has no process record of its own, or when an "
+            "executing non-root process has no creation record."
+        ),
+    )
+    missing_record: bool = Field(
+        default=False,
+        description=(
+            "Set for placeholder nodes that represent a creator referenced by a creation event but never "
+            "observed as a running or created process in the report."
+        ),
+    )
+    end_reason: str = Field(
+        description=(
+            "How the process ended.\n\n"
+            "``completed``: its entry run returned; ``error``: the run terminated with an error; "
+            "``not_emulated``: the process was created but never scheduled (for example child emulation was off); "
+            "``skipped``: child emulation was attempted but the image could not be loaded; "
+            "``missing_record``: placeholder node without an actual process."
+        )
+    )
+    end_detail: str | None = Field(
+        default=None,
+        description="Human-readable detail for the end reason: error summary or child-skip reason, when available.",
+    )
+    error_type: str | None = Field(
+        default=None,
+        description="Error category from the process's failed entry run, when ``end_reason`` is ``error``."
+    )
+    exit_code: HexIntOptional = Field(
+        default=None,
+        description="Return value produced by the completed entry run, interpreted as the process exit code."
+    )
+    files: list[ProcessFileSummary] = Field(
+        default_factory=list,
+        description="File operations attributed to this process, aggregated by target path.",
+    )
+    network: list[ProcessNetworkSummary] = Field(
+        default_factory=list,
+        description="DNS, socket, and HTTP activity attributed to this process.",
+    )
+    children: list["ProcessNode"] = Field(
+        default_factory=list,
+        description="Processes directly created by this process, in creation order.",
+    )
+
+
+ProcessNode.model_rebuild()
+
+
 class Report(BaseModel):
     """Top-level Speakeasy output report model.
 
@@ -737,6 +894,15 @@ class Report(BaseModel):
         description=(
             "Ordered list of all runs executed during emulation.\n\n"
             "This is the primary behavioral timeline for the report."
+        ),
+    )
+    process_tree: list[ProcessNode] | None = Field(
+        default=None,
+        description=(
+            "Processes of the session stitched into parent/child hierarchy, with the initial process at the root.\n\n"
+            "Each node carries its image path, creator, end reason, and the file and network actions attributed "
+            "to that process. Nodes keyed by pid disambiguate repeated spawns of the same path, and placeholder "
+            "nodes flag creation records whose parent process is missing from the report."
         ),
     )
 
