@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Discriminator, Field
+from pydantic import BaseModel, ConfigDict, Discriminator, Field
 
 # process events
 PROC_CREATE = "process_create"
@@ -70,6 +70,55 @@ class TracePosition(BaseModel):
     )
 
 
+class MergeSourceRef(BaseModel):
+    """References one source report that contributed an element during merging.
+
+    Populated only by the report-merge workflow; absent from single-run reports.
+    Use these labels to trace a merged action, error, or run back to the exact
+    colleague-produced report directory.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(
+        description=(
+            "Label of the merged-in source report, typically its file path.\n\n"
+            "Matches an entry in the top-level ``merged_from`` list."
+        )
+    )
+    count: int = Field(
+        default=1,
+        description=(
+            "How many equivalent observations this source contributed.\n\n"
+            "Usually 1; greater when the same source recorded the element repeatedly."
+        ),
+    )
+
+
+class EventVariantDiff(BaseModel):
+    """Describes one field that differs between parameter-level variants of one action.
+
+    When separate runs observed the same logical action with different parameters,
+    every variant is kept as its own event and the variants share a ``variant_group``
+    identifier. The first variant in stream order carries these diff entries, with
+    ``values`` aligned to the ordered variant events.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: str = Field(
+        description=(
+            "Dotted path of the differing event field, for example ``args[0].display`` or ``ret_val``."
+        )
+    )
+    values: list[str | None] = Field(
+        description=(
+            "Rendered value of the field for each variant, in variant stream order.\n\n"
+            "``null`` means the field was absent on that variant."
+        )
+    )
+
+
 class Event(BaseModel):
     """Base class shared by all report event records.
 
@@ -85,6 +134,30 @@ class Event(BaseModel):
         )
     )
     event: str = Field(description=("Event type discriminator.\n\nDetermines which concrete payload schema applies."))
+    sources: list[MergeSourceRef] | None = Field(
+        default=None,
+        description=(
+            "Merge-only provenance: source reports in which this exact action was observed.\n\n"
+            "A single event shared by every run lists every contributing source. "
+            "Absent from single-run reports."
+        ),
+    )
+    variant_group: str | None = Field(
+        default=None,
+        description=(
+            "Merge-only identifier shared by variants of the same logical action.\n\n"
+            "Events that share a group matched on the action identity but differ in "
+            "parameters or return value; inspect ``variant_diff`` for the differing fields."
+        ),
+    )
+    variant_diff: list[EventVariantDiff] | None = Field(
+        default=None,
+        description=(
+            "Merge-only summary of the fields that distinguish this variant group.\n\n"
+            "Carried on the first variant in stream order; ``values`` align with the "
+            "ordered variant events sharing the same ``variant_group``."
+        ),
+    )
 
 
 class ApiArg(BaseModel):

@@ -10,7 +10,8 @@ speakeasy --target <path-to-sample> [flags]
 
 Rules:
 - `--target` is required for emulation runs.
-- `--dump-default-config` is the only mode that does not require `--target`.
+- `--dump-default-config` and `--merge-report` are the modes that do not require `--target`.
+- `--merge-report` cannot be combined with `--target`.
 
 Default config dump:
 
@@ -18,12 +19,25 @@ Default config dump:
 speakeasy --dump-default-config > default-config.json
 ```
 
+Report merge:
+
+```bash
+speakeasy --merge-report runs/alice --merge-report runs/bob/report.json --output merged.json
+```
+
+`--merge-report` takes an existing report JSON file or a directory to scan (recursively) for report
+JSON files, and may be repeated. Explicit file arguments must be valid reports; JSON files found while
+walking a directory are included only when they validate as reports. The merged report is written to
+`--output`, or printed to standard output when no output path is given. See
+[Report walkthrough](reporting.md#merged-reports) for the merge semantics.
+
 ## Runtime-only flags
 
 These flags are not generated from the config schema.
 
 - `-t, --target`: input file to emulate
 - `-o, --output`: output report JSON path
+- `--merge-report`: merge existing report JSON file(s), or directories containing them, into one report instead of emulating (repeatable)
 - `--argv`: argv values for the emulated process (quoted string, parsed with shell rules). For an EXE they replace `command_line`, and the process command line is the quoted program path followed by these values
 - `-c, --config`: JSON config overlay file
 - `--dump-default-config`: print built-in default config and exit
@@ -151,6 +165,13 @@ Memory snapshots and dropped-files archive:
 
 ```bash
 speakeasy --target sample.exe --snapshot-memory-regions --dropped-files-path dropped.zip
+```
+
+Merge separate runs of one sample from colleague directories:
+
+```bash
+speakeasy --merge-report runs/alice --merge-report runs/bob --merge-report runs/carol/report.json \
+  --output merged.json
 ```
 
 ## Related docs

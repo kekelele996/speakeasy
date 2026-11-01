@@ -24,6 +24,7 @@ from speakeasy.cli_config import (
     merge_config_dicts,
 )
 from speakeasy.config import SpeakeasyConfig
+from speakeasy.report_merge import ReportMergeError, get_merged_json_report, merge_report_files
 from speakeasy.volumes import apply_volumes
 
 logger = logging.getLogger(__name__)
@@ -264,6 +265,26 @@ def run_main(parser: argparse.ArgumentParser, args: argparse.Namespace, config_s
     return error
 
 
+def merge_main(args: argparse.Namespace) -> str | None:
+    """Merge existing run reports instead of emulating a target."""
+
+    setup_logging(args.verbose)
+    logger.info("* Merging reports from %d input(s)", len(args.merge_report))
+    try:
+        report = merge_report_files(args.merge_report)
+        rendered = get_merged_json_report(report)
+    except ReportMergeError as err:
+        return str(err)
+
+    if args.output:
+        logger.info("* Saving merged report to %s", args.output)
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(rendered)
+    else:
+        print(rendered)
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Emulate a Windows binary with speakeasy", allow_abbrev=False)
     parser.add_argument(
@@ -271,6 +292,16 @@ def main():
     )
     parser.add_argument(
         "-o", "--output", action="store", dest="output", required=False, help="Path to output file to save report"
+    )
+    parser.add_argument(
+        "--merge-report",
+        action="append",
+        dest="merge_report",
+        default=[],
+        required=False,
+        help="Merge existing report JSON files (or directories containing them) into one report "
+        "ordered by emulation start time, instead of emulating a target. Repeatable; files found "
+        "inside directories are included when they are valid Speakeasy reports.",
     )
     parser.add_argument(
         "--argv",
@@ -393,7 +424,12 @@ def main():
     if args.dump_default_config:
         print(json.dumps(get_default_config_dict(), indent=4))
         return
-    error = run_main(parser, args, config_specs)
+    if args.merge_report:
+        if args.target:
+            parser.error("--merge-report cannot be combined with --target")
+        error = merge_main(args)
+    else:
+        error = run_main(parser, args, config_specs)
     if error:
         logger.error("error: %s", error)
         sys.exit(1)

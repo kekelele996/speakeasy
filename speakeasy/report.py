@@ -3,7 +3,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer
 
-from speakeasy.profiler_events import AnyEvent
+from speakeasy.profiler_events import AnyEvent, MergeSourceRef
 
 
 def hex_serializer(v: int | None) -> str | None:
@@ -216,6 +216,13 @@ class ErrorInfo(BaseModel):
     interrupt_num: int | None = Field(
         default=None,
         description="Interrupt number for unhandled-interrupt errors.",
+    )
+    sources: list[MergeSourceRef] | None = Field(
+        default=None,
+        description=(
+            "Merge-only provenance: source reports in which this exact error was observed.\n\n"
+            "Identical errors from several runs are kept once and list every contributing source."
+        ),
     )
 
 
@@ -520,6 +527,32 @@ class MemoryLayout(BaseModel):
     )
 
 
+class EntryPointOutcome(BaseModel):
+    """One distinct run outcome observed across merged reports for the same entry point.
+
+    Separate runs of the same entry point can end normally in some reports and fail
+    in others, or fail at different stages. Each distinct outcome is kept here with
+    the sources that produced it, so failure reasons are never lost in a merge.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sources: list[MergeSourceRef] = Field(
+        description="Source reports that observed this return value / failure combination."
+    )
+    ret_val: HexIntOptional = Field(
+        default=None,
+        description="Return value observed for this outcome, when the run ended normally.",
+    )
+    error: ErrorInfo | None = Field(
+        default=None,
+        description=(
+            "Failure observed for this outcome.\n\n"
+            "``null`` means the contributing runs completed the entry point without an error."
+        ),
+    )
+
+
 class EntryPoint(BaseModel):
     """Represents one emulation execution primitive captured as a run.
 
@@ -635,6 +668,46 @@ class EntryPoint(BaseModel):
             "Populate this when memory-layout capture is active for the emulator mode."
         ),
     )
+    sources: list[MergeSourceRef] | None = Field(
+        default=None,
+        description=(
+            "Merge-only provenance: source reports that contained this entry point.\n\n"
+            "Absent from single-run reports."
+        ),
+    )
+    outcome_variants: list[EntryPointOutcome] | None = Field(
+        default=None,
+        description=(
+            "Merge-only outcomes observed for this entry point across runs.\n\n"
+            "Present only when return values or failures differed between sources; "
+            "the top-level ``ret_val``/``error`` fields reflect the earliest variant."
+        ),
+    )
+
+
+class MergedSource(BaseModel):
+    """Describes one input report consumed by a report-merge operation.
+
+    Entries are ordered by emulation start timestamp, which is also the order in
+    which the merge consumed the reports. Per-source input metadata is retained
+    here even when the top-level metadata fields collapse to one value.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(description="Label of the source report, typically its file path.")
+    path: str | None = Field(default=None, description="Filesystem path the report was read from.")
+    timestamp: int | None = Field(
+        default=None,
+        description="Emulation start timestamp (epoch seconds) recorded by this source.",
+    )
+    arch: str | None = Field(default=None, description="Architecture label recorded by this source.")
+    filepath: str | None = Field(default=None, description="Input file path recorded by this source.")
+    sha256: str | None = Field(default=None, description="Input file SHA-256 recorded by this source.")
+    size: int | None = Field(default=None, description="Input file size recorded by this source.")
+    filetype: str | None = Field(default=None, description="Input file type recorded by this source.")
+    entry_points: int = Field(default=0, description="Number of entry points contributed by this source.")
+    errors: int = Field(default=0, description="Number of top-level errors contributed by this source.")
 
 
 class Report(BaseModel):
@@ -737,6 +810,13 @@ class Report(BaseModel):
         description=(
             "Ordered list of all runs executed during emulation.\n\n"
             "This is the primary behavioral timeline for the report."
+        ),
+    )
+    merged_from: list[MergedSource] | None = Field(
+        default=None,
+        description=(
+            "Source reports combined to produce this report, ordered by emulation start time.\n\n"
+            "Present only on merged reports produced by the report-merge workflow."
         ),
     )
 

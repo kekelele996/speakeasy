@@ -481,6 +481,48 @@ thread, even for a local create.
 }
 ```
 
+## Merged reports
+
+Several reports for the same input file (for example one run per colleague in separate directories)
+can be combined with `speakeasy --merge-report <file-or-dir>` (repeatable), which writes the same
+`Report` schema — no separate viewer is needed. Merge-only fields are optional and absent from
+ordinary single-run reports.
+
+Ordering and provenance:
+- sources are sorted by emulation start `timestamp` and listed in top-level `merged_from`, each
+  retaining its own input metadata (`filepath`, `sha256`, `size`, `filetype`, `arch`) and
+  entry-point/error counts;
+- the merged `timestamp` is the earliest start and `emulation_total_runtime` is the sum;
+- collapsed top-level metadata (e.g. `sha256`) comes from the earliest source carrying it.
+
+Entry points are grouped by identity (`ep_type`, `start_addr`, `ep_args`) in first-seen order; each
+merged entry point lists contributing runs in `sources`. Inside one group, actions are aligned
+across runs by logical identity and per-source occurrence (the 1st, 2nd, ... call of an API, in
+stream order). Execution position (`pos`: tick/tid/pid/pc) never participates in comparison.
+
+- An action with identical content in every run is kept once, and its `sources` list every run that
+  observed it.
+- The same action observed with different parameters or return values is kept once per variant.
+  Variants share a `variant_group` id (for example `api:kernel32.CreateFileA#1`); the first variant
+  carries `variant_diff`, a list of differing field paths (`args[0].display`, `ret_val`, ...) with
+  the rendered value per variant aligned to variant stream order. Each variant carries only the
+  sources that observed it.
+- Distinct actions are always kept; no behavioral event is dropped.
+
+Failures are preserved at both levels:
+- identical top-level `errors` collapse to one entry with combined `sources`; differing errors all
+  remain;
+- when the same entry point ended differently across runs (clean return, or distinct failures),
+  `outcome_variants` lists every observed `ret_val`/`error` pair with its sources; the entry-point
+  level `ret_val`/`error` reflect the earliest variant.
+
+Payloads and other sections:
+- top-level `data` stores are unioned by SHA-256 key, so every `data_ref`/`body_ref` in the merged
+  events stays resolvable; a same-key disagreement fails the merge;
+- `strings` buckets are de-duped unions;
+- `coverage` is a sorted union, `sym_accesses` counters are summed, and `dynamic_code_segments`,
+  `dropped_files`, and the memory layout/modules snapshots are exact-content de-duped unions.
+
 ## Related docs
 
 - [Project README](../README.md)
